@@ -1,0 +1,12 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<BorlandProject>
+	<Transactions>
+    <Transaction>1899.12.30 00:00:00.000.102,=D:\Projects\NewSystemXE\Server\n_OnlinePocedures.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.622,L:\TMP\_000XE\Server\v_n_WebArmProcedures.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.567,=D:\Projects\NewSystemXE\Server\sCSSserver.todo</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.165,D:\Projects\NewSystemXE\Server\n_OnlinePocedures.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.692,=D:\Projects\NewSystemXE\Common\t_ExcelXmlUse.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.694,D:\Projects\NewSystemXE\Server\n_WebArmProcedures.pas=L:\TMP\_000XE\Server\v_n_WebArmProcedures.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.473,=D:\Projects\NewSystemXE\Server\n_WebArmProcedures.pas</Transaction>
+  </Transactions>
+</BorlandProject>

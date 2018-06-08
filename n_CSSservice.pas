@@ -1,0 +1,389 @@
+unit n_CSSservice;
+
+interface
+
+uses
+  Windows, Messages, SysUtils, Classes, Graphics, Controls, SvcMgr, WinSvc, INIFiles,
+  Dialogs, Registry, Forms, ShellAPI, Menus, ImgList, n_free_functions, n_server_common;
+
+const WM_ICONTRAY = WM_USER+1;
+
+type
+  TServiceCSS = class(TService)
+    procedure ServiceTestDescription;
+    procedure ServiceCreate(Sender: TObject);
+    procedure ServiceStart(Sender: TService; var Started: Boolean);
+    procedure ServiceStop(Sender: TService; var Stopped: Boolean);
+    procedure ServiceShutdown(Sender: TService);
+    procedure ServiceStopping;
+  private { Private declarations }
+  public  { Public declarations }
+    function GetServiceController: TServiceController; override;
+//    procedure PopupMenuItemsClick(Sender: TObject);
+//    procedure PopupMenuPopup(Sender: TObject);
+//    procedure CreatePopupMenu;
+  end;
+
+  TIconThread = class(TThread)
+  private { Private declarations }
+  protected
+    procedure Execute; override;
+  public  { Public declarations }
+    procedure ShowIcon;
+  end;
+
+  TInitThread = class(TThread)
+  private { Private declarations }
+  protected
+    procedure Execute; override;
+  public  { Public declarations }
+  end;
+
+var
+  IsServiceCSS: Boolean; // признак работы сервиса
+
+  ServiceCSS: TServiceCSS;
+  InitThread: TInitThread;
+  Installing, fIconExist: Boolean;
+  ServiceGoOut: Boolean;   // флаг необходимости остановки сервиса
+  IconID: Integer;
+  TrayIconData: TNotifyIconData;
+  PopupMenuIcon: TPopupMenu;
+
+  IconThread: TIconThread; // поток управления иконкой
+  iFileDateIni: Integer;   // дата и время последнего считывания ini-файла
+  iAppStatus: Integer;     // значение последней проверки статуса
+  icoMessage: DWORD;
+
+  procedure StopServiceCSS; // остановка сервиса по требованию
+  procedure SetTrayIconData;
+
+implementation
+
+uses n_server_main, v_constants, n_constants, n_CSSThreads;
+
+{$R *.DFM}
+//============================================================= инициация службы
+procedure TServiceCSS.ServiceCreate(Sender: TObject);
+begin
+  Name:= Application.Name;
+  DisplayName:= '*'+Name+'*'; // название службы 
+//  DisplayName:= GetIniParam(nmIniFileBOB,'service','DisplayName','*'+Application.Name+'*'); // читаем название службы из ini-файла
+  ServiceTestDescription; // проверяем описание службы
+  Interactive:= not flCSSnew;
+end;
+//====================================================== поток инициации потоков
+procedure TInitThread.Execute; // нужен, чтобы основной поток не зависал на инициации
+var i: integer;
+  //-------------------------
+  function MustGoOut: Boolean;
+  begin
+    Result:= ServiceGoOut or Terminated or Application.Terminated;
+  end;
+  //-------------------------
+begin
+//  FreeOnTerminate:= True;
+  ServiceGoOut:= not fnServerInit; // выполняет подключения к ГроссБии, ADS и пр.
+  while not MustGoOut do begin
+//    prMessageLOGS(FormatFloat('check mem : ,.# K', fnGetCurrentMemoryUsage/1024), 'MemUsed', false);
+    for i:= 0 to 3600 do // 30 мин
+      if MustGoOut then break else sleep(499); // 499 - простое число
+  end;
+  Terminate;
+end;
+//================================================================ запуск службы
+procedure TServiceCSS.ServiceStart(Sender: TService; var Started: Boolean);
+var ar: Tas;
+    rIniFile: TINIFile;
+begin
+  if Installing then Exit;
+  Started:= False;
+
+  SetCurrentDir(GetAppExePath); // устанавливаем рабочую папку
+  Application.CreateForm(TForm1, Form1); // форма
+  Form1.Visible:= not flCSSnew;
+
+  iAppStatus:= AppStatus;
+  iAppStatus:= 0;
+  iFileDateIni:= 0;
+  Application.ProcessMessages;
+
+  if not flCSSnew then try
+    rIniFile:= TINIFile.Create(nmIniFileBOB);
+    ar:= fnSplitString(rIniFile.ReadString('service', 'fbounds', ''));
+    with Form1 do begin
+      Position:= poDesigned;            // положение формы
+      if (length(ar)<4) then SetBounds(0, (Screen.Width-Width) div 2, Width, Height) // на верх экрана
+      else SetBounds(StrToIntDef(ar[0], Left), StrToIntDef(ar[1], Top),
+        StrToIntDef(ar[2], Width), StrToIntDef(ar[3], Height));
+      BorderIcons:= BorderIcons-[biMinimize, biMaximize];
+    end;
+  finally
+    setLength(ar, 0);
+    prFree(rIniFile);
+  end;
+
+  Randomize;
+  IconID:= Random(High(Word)-1); // id иконки
+
+  IconThread:= TIconThread.Create(True); // запускаем поток управления иконкой
+  if flCSSnew then PopupMenuIcon:= nil else Form1.CreatePopupMenu; // создание меню иконки
+  Application.ProcessMessages;
+//  IconThread.Resume;
+  IconThread.Start;
+  sleep(101);
+
+  InitThread:= TInitThread.Create(False); // запускаем поток инициации потоков
+  Started:= True;
+end;
+//============================================================= остановка службы
+procedure TServiceCSS.ServiceStop(Sender: TService; var Stopped: Boolean);
+var rIniFile: TINIFile;
+begin
+  if not flCSSnew then try
+    rIniFile:= TINIFile.Create(nmIniFileBOB);
+    with Form1 do rIniFile.WriteString('service', 'fbounds',
+      IntToStr(Left)+';'+IntToStr(Top)+';'+IntToStr(Width)+';'+IntToStr(Height));
+  finally
+    prFree(rIniFile);
+  end;
+  Stopped:= False;
+  ServiceStopping;
+  Stopped:= True;
+end;
+//==================================================== завершение работы Windows
+procedure TServiceCSS.ServiceShutdown(Sender: TService);
+begin
+  ServiceStopping;
+end;
+//==================================================== завершение работы потоков
+procedure TServiceCSS.ServiceStopping;
+var i: Integer;
+begin
+  if Installing or not (AppStatus<stExiting) then Exit;
+
+  ServiceGoOut:= True;    // устанавливаем флаг - Остановить службу
+  if Assigned(InitThread) and not InitThread.Terminated then InitThread.Terminate;
+
+  if Assigned(Form1) and Form1.Visible then Form1.Hide;
+
+  if AppStatus<stExiting then prServerExit; // завершение работы потоков
+  i:= 0;
+  if Assigned(IconThread) then // ждем остановки потока управления иконкой
+    while not IconThread.Terminated and (i<100) do begin
+      sleep(31);
+      inc(i);
+    end;
+  prFree(PopupMenuIcon);
+  if Assigned(Form1) then Form1.Release;
+end;
+//==============================================================================
+procedure ServiceController(CtrlCode: DWord); stdcall;
+begin
+  ServiceCSS.Controller(CtrlCode);
+end;
+//==============================================================================
+function TServiceCSS.GetServiceController: TServiceController;
+begin
+  Result:= ServiceController;
+end;
+//==================================================== проверяем описание службы
+procedure TServiceCSS.ServiceTestDescription;
+var Reg: TRegIniFile;
+    s, skey, sparam, olddef, newdef: string;
+begin
+  skey:= '\SYSTEM\CurrentControlSet\Services\'+Name;
+  sparam:= 'Description';
+  s:= 'Сервис системы CSS';
+  try
+    Reg:= TRegIniFile.Create(KEY_ALL_ACCESS);
+    try
+      Reg.RootKey:= HKEY_LOCAL_MACHINE;
+      olddef:= Reg.ReadString(skey, sparam, ''); // читаем старое описание из реестра
+      newdef:= GetIniParam(nmIniFileBOB, 'service', sparam); // читаем новое описание из ini-файла
+      if (olddef='') and (newdef='') then newdef:= s // проверяем, нужно ли менять описание
+      else if newdef=olddef then newdef:= '';
+      if (newdef<>'') then Reg.WriteString(skey, sparam, newdef); // меняем описание службы
+    except
+      on E: Exception do prMessageLOGS('ServiceTestDescription: Не удалось записать описание сервиса в реестр','system');
+    end;
+  finally
+    prFree(Reg);
+  end;
+end;
+(*
+//========================================================== создаем меню иконки
+procedure TServiceCSS.CreatePopupMenu;
+var i,j: integer;
+    aCaptions: Tas;
+begin
+  PopupMenuIcon:= TPopupMenu.Create(Form1);
+  PopupMenuIcon.AutoHotkeys:= maManual;
+  PopupMenuIcon.Tag:= 0; // индекс пункта информации
+  PopupMenuIcon.AutoPopup:= False;
+  PopupMenuIcon.Alignment:= paRight;
+  PopupMenuIcon.WindowHandle:= Form1.Handle;
+  PopupMenuIcon.OnPopup:= PopupMenuPopup;
+
+  SetLength(aCaptions, 9); // названия пунктов меню
+  aCaptions[0]:= '-'; // пункт информации - имя и состояние сервиса
+  aCaptions[1]:= '-'; // разделитель
+  aCaptions[2]:= 'Остановить '+ServiceCSS.Name; // Items[i].Tag=0
+  aCaptions[3]:= '-'; // разделитель
+  aCaptions[4]:= 'Показать окно';               // Items[i].Tag=1
+  aCaptions[5]:= 'Скрыть окно';                 // Items[i].Tag=2
+  aCaptions[6]:= '-'; // разделитель
+  aCaptions[7]:= 'Suspend';                     // Items[i].Tag=3
+  aCaptions[8]:= 'Resume';                      // Items[i].Tag=4
+
+  j:= 0;
+  for i:= 0 to Length(aCaptions)-1 do begin
+    PopupMenuIcon.Items.Add(TMenuItem.Create(PopupMenuIcon));
+    PopupMenuIcon.Items[PopupMenuIcon.Items.Count-1].Caption:= aCaptions[i];
+    if (aCaptions[i][1]<>'-') then begin // если не разделитель или информация
+      PopupMenuIcon.Items[PopupMenuIcon.Items.Count-1].Tag:= j;
+      PopupMenuIcon.Items[PopupMenuIcon.Items.Count-1].OnClick:= PopupMenuItemsClick;
+      inc(j);
+    end;
+  end;
+end;
+//======================================================= показываем меню иконки
+procedure TServiceCSS.PopupMenuPopup(Sender: TObject);
+var i: integer;
+begin
+  PopupMenuIcon.Items[PopupMenuIcon.Tag].Caption:= // имя и состояние сервиса
+    ServiceCSS.Name+' - '+arCSSServerStatusNames[AppStatus];
+  for i:= 0 to PopupMenuIcon.Items.Count-1 do
+    case PopupMenuIcon.Items[i].Tag of
+      1:  PopupMenuIcon.Items[i].Enabled:= not Form1.Visible;          // Показать окно
+      2:  PopupMenuIcon.Items[i].Enabled:= Form1.Visible;              // Скрыть окно
+      3:  PopupMenuIcon.Items[i].Enabled:= AppStatus in [stWork];      // Suspend
+      4:  PopupMenuIcon.Items[i].Enabled:= AppStatus in [stSuspended]; // Resume
+    end;
+  SetForegroundWindow(Form1.Handle);
+end;
+//=================================================== выбираем пункт меню иконки
+procedure TServiceCSS.PopupMenuItemsClick(Sender: TObject);
+begin
+  case TMenuItem(Sender).Tag of
+    0:  begin
+          ServiceGoOut:= True;                // устанавливаем флаг - Остановить службу
+          prMessageLOGS('Выбран пункт PopupMenu: Завершить работу', 'system');
+        end;
+    1:  if not Form1.Visible then Form1.Show; // Показать окно
+    2:  if Form1.Visible then Form1.Hide;     // Скрыть окно
+    3:  prSafeSuspendAll;                     // Suspend
+    4:  begin                                 // Resume
+          SetLength(StopList, 0);
+          prResumeAll;
+        end;
+  end;
+end;
+*)
+//======================================= показ/изменение/удаление иконки в трее
+procedure TIconThread.ShowIcon;
+var res: boolean;
+begin
+  if flCSSnew then begin
+    if icoMessage=NIM_MODIFY then begin
+      SetTrayIconData;
+      Shell_NotifyIcon(icoMessage, @TrayIconData); // меняем иконку
+    end;
+  end else begin
+    if not fIconExist and ((FindWindow('Shell_TrayWnd', NIL)<1) or (icoMessage=NIM_DELETE)) then begin
+      Exit;
+    end else begin
+      if not (icoMessage=NIM_DELETE) then SetTrayIconData;
+      if fIconExist and (icoMessage=NIM_ADD) then icoMessage:= NIM_MODIFY
+      else if not fIconExist and (icoMessage=NIM_MODIFY) then icoMessage:= NIM_ADD;
+    end;
+    res:= Shell_NotifyIcon(icoMessage, @TrayIconData); // меняем иконку в трее
+    if res and (icoMessage=NIM_ADD) then fIconExist:= res; // если добавили иконку в трей -
+                                                         // взводим флаг существования иконки
+  end;
+  iAppStatus:= AppStatus;
+end;
+//===================================================== поток управления иконкой
+procedure TIconThread.Execute;
+var i, j: integer;
+    FileDateTime: TDateTime;
+//--------------------------
+function GoExit: Boolean;
+begin
+  Result:= (Terminated or not Assigned(ServiceCSS) or ServiceCSS.Terminated or (AppStatus=stClosed));
+end;
+//--------------------------
+begin
+  Randomize;
+  iAppStatus:= -1;
+  fIconExist:= False;     // флаг существования иконки
+  icoMessage:= NIM_ADD;
+  if not flCSSnew then Synchronize(ShowIcon); // Создаём иконку в трее
+//  prMessageLOGS('  Synchronize(ShowIcon), AppStatus= '+IntToStr(AppStatus), 'system', False);
+  Application.ProcessMessages;
+
+  repeat
+    if GoExit then break;
+    i:= 0;
+    if FileAge(nmIniFileBOB, FileDateTime) then i:= DateTimeToFileDate(FileDateTime);
+    if (i>0) and (iFileDateIni<>i) then begin
+      ServiceCSS.ServiceTestDescription; // если изменился ini-файл - проверяем описание службы
+      iFileDateIni:= i;
+    end;
+{    if (iFileDateIni<>FileAge(nmIniFileBOB)) then begin
+      ServiceCSS.ServiceTestDescription; // если изменился ini-файл - проверяем описание службы
+      iFileDateIni:= FileAge(nmIniFileBOB);
+    end;  }
+    for i:= 1 to 10 do begin
+      ServiceCSS.ServiceThread.ProcessRequests(False); // проверяем команды менеджера служб   ??? зачем
+      if GoExit then break;
+      if iAppStatus<>AppStatus then begin // если изменился статус приложения
+        icoMessage:= NIM_MODIFY;
+        if not flCSSnew then Synchronize(ShowIcon); // меняем иконку в трее
+//        prMessageLOGS('  Synchronize(ShowIcon), AppStatus= '+IntToStr(AppStatus), 'system', False);
+        Application.ProcessMessages;
+      end;
+      if GoExit then break;
+      j:= 61+Random(41);
+      sleep(j);
+    end;
+  until GoExit;
+  if fIconExist then begin   // если есть иконка в трее
+    icoMessage:= NIM_DELETE;
+    if not flCSSnew then Synchronize(ShowIcon);   // Убираем иконку в трее
+  end;
+  Terminate;
+end;
+//======================================================= свойства иконки в трее
+procedure SetTrayIconData;
+begin
+//  prMessageLOGS('SetTrayIconData: Form1.Handle='+IntToStr(Form1.Handle)+
+//    ', Application.Icon.Handle='+IntToStr(Application.Icon.Handle)+
+//    ', IconID='+IntToStr(IconID)+', AppStatus='+IntToStr(AppStatus), 'system');
+  with TrayIconData do begin
+    cbSize:= system.SizeOf(TrayIconData);
+    Wnd:= Form1.Handle;
+    uID:= IconID;
+    uFlags:= NIF_MESSAGE or NIF_ICON or NIF_TIP;
+    hIcon:= Application.Icon.Handle;
+    uCallbackMessage:= WM_ICONTRAY;
+    StrCopy(szTip, PChar(Application.Name+#13+arCSSServerStatusNames[AppStatus]));
+  end;
+end;
+//============================================== остановка сервиса по требованию
+procedure StopServiceCSS;
+var Mgr, Svc: Cardinal;
+    servstat: _SERVICE_STATUS;
+begin
+  Mgr:= OpenSCManager(nil, nil, SC_MANAGER_ALL_ACCESS);
+  if Mgr<>0 then begin
+    Svc:= OpenService(Mgr, PChar(ServiceCSS.Name), SERVICE_STOP);
+    if Svc<>0 then begin
+      ControlService(Svc, SERVICE_CONTROL_STOP, servstat);
+      CloseServiceHandle(Svc);
+    end else prMessageLOGS('Ошибка остановки сервиса по требованию - Svc=0', 'system');
+    CloseServiceHandle(Mgr);
+  end else prMessageLOGS('Ошибка остановки сервиса по требованию - Mgr=0', 'system');
+end;
+
+end.

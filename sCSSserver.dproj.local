@@ -1,0 +1,32 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<BorlandProject>
+	<Transactions>
+    <Transaction>1899.12.30 00:00:00.000.739,D:\Projects\NewSystemXE\Server\Unit1.pas=D:\Projects\NewSystemXE\Server\s_Utils.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.151,=D:\Projects\NewSystemXE\Server\t_CSSThreads.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.102,D:\Projects\NewSystemXE\Server\v_OnlineOrderPocedures.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.635,D:\Projects\NewSystemXE\Server\Unit1.pas=D:\Projects\NewSystemXE\Server\s_WebArmProcedures.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.483,D:\Projects\NewSystemXE\Server\Unit1.pas=D:\Projects\NewSystemXE\Server\s_OnlineCommandFunc.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.216,=D:\Projects\NewSystemXE\Server\Unit1.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.007,D:\Projects\NewSystemXE\Server\n_vlad_init.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.692,=D:\Projects\NewSystemXE\Common\t_ExcelXmlUse.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.622,L:\TMP\_000XE\Server\v_n_WebArmProcedures.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.694,L:\TMP\_000XE\Server\v_n_WebArmProcedures.pas=D:\Projects\NewSystemXE\Server\n_WebArmProcedures.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.025,D:\Projects\NewSystemXE\Common\n_vlad_common.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.567,=D:\Projects\NewSystemXE\Server\sCSSserver.todo</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.206,D:\Projects\NewSystemXE\Server\s_OnlineProceduresOrd.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.031,=D:\Projects\NewSystemXE\Server\Unit1.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.054,D:\Projects\NewSystemXE\Server\n_MailReports.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.307,=D:\Projects\NewSystemXE\Server\s_OnlineProcedures.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.473,=D:\Projects\NewSystemXE\Server\n_WebArmProcedures.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.000,D:\Projects\NewSystemXE\Common\n_vlad_mail.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.165,D:\Projects\NewSystemXE\Server\n_OnlinePocedures.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.102,=D:\Projects\NewSystemXE\Server\n_OnlinePocedures.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.044,D:\Projects\NewSystemXE\Server\n_MailServis.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.122,=D:\Projects\NewSystemXE\Server\Unit1.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.223,D:\Projects\NewSystemXE\Server\Unit1.pas=D:\Projects\NewSystemXE\Server\s_CommandFunc.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.593,D:\Projects\NewSystemXE\Server\Unit1.pas=D:\Projects\NewSystemXE\Server\s_OnlineProceduresOrd.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.062,D:\Projects\NewSystemXE\Common\n_func_ads_loc.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.195,=D:\Projects\NewSystemXE\Server\Unit1.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.820,=D:\Projects\NewSystemXE\Server\Unit1.pas</Transaction>
+  </Transactions>
+</BorlandProject>

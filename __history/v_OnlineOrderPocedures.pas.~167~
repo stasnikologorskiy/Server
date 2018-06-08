@@ -1,0 +1,2120 @@
+unit v_OnlineOrderPocedures;
+//############################################################################//
+//## Процедуры, связанные с обработкой запросов к системе заказов через Web ##//
+//############################################################################//
+
+interface
+uses Classes, SysUtils, DB, Math, Variants, IBDatabase, IBSQL, IBQuery,
+     System.Contnrs,
+     n_free_functions, v_constants, v_DataTrans, v_Server_Common,
+     n_LogThreads, n_DataSetsManager, n_server_common;
+
+
+procedure prGetAllUsersInfo(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+procedure prGetWaresFromAccountList(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+procedure prShowGBOutInvoice(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+procedure prShowGBBack(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+procedure prGetUnpayedDocs(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+procedure prGetCheck(Stream: TBoBMemoryStream; ThreadData: TThreadData);// сверка
+procedure prSendMessage2Manager(Stream: TBoBMemoryStream; ThreadData: TThreadData);// отправить менеджеру письмо
+procedure prGetSaleBrands(Stream: TBoBMemoryStream; ThreadData: TThreadData);// Показать список брендов, участвующих в распродаже
+procedure prGetActions(Stream: TBoBMemoryStream; ThreadData: TThreadData); // Выдать инфу по акциям и пр
+procedure prClickOnNewsCounting(Stream: TBoBMemoryStream; ThreadData: TThreadData); // Фиксация клика по новостям/акциям
+procedure prSaveOption(Stream: TBoBMemoryStream; ThreadData: TThreadData); //
+procedure prGetQtyByAnalogsAndStoragesOrd(Stream: TBoBMemoryStream; ThreadData: TThreadData); //Выдать данные с остатками по склaдам и заказанному кол-ву по товару с аналогами и возможностью редактирования количеств
+procedure prSendVINOrder(Stream: TBoBMemoryStream; ThreadData: TThreadData); //
+procedure prDownloadPrice(Stream: TBoBMemoryStream; ThreadData: TThreadData); //
+procedure prShowNotificationOrd(Stream: TBoBMemoryStream; ThreadData: TThreadData); //
+procedure prConfirmNotification(Stream: TBoBMemoryStream; ThreadData: TThreadData); //
+procedure prContractList(Stream: TBoBMemoryStream; ThreadData: TThreadData); //
+procedure prChangeContractAccess(Stream: TBoBMemoryStream; ThreadData: TThreadData); //
+procedure prSendOrderForChangePersonData(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+procedure prSendOrderForAddContactPerson(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+procedure prRemindPass(Stream: TBoBMemoryStream; ThreadData: TThreadData); // Напоминание пароля
+procedure prGetContracts(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+procedure prGetBonusWares(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+implementation
+
+uses v_Functions, n_MailServis, n_constants, n_CSSservice, n_DataCacheInMemory,
+  n_CSSThreads, n_vlad_mail, n_DataCacheObjects, n_DataCacheAddition;
+
+
+// передает данные по правам юзеров данного контрагента
+procedure prGetAllUsersInfo(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prGetAllUsersInfo'; // имя процедуры/функции
+var UserId, FirmID, i, j, ii: integer;
+    Users, NonUsers: Tai;
+    Person: TClientInfo;
+    s: string;
+    Contracts: TIntegerList;
+    Contract: TContract;
+begin
+  Stream.Position:= 0;
+  SetLength(Users, 0);
+  SetLength(NonUsers, 0);
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    prSetThLogParams(ThreadData,0,UserID,FirmID,''); // логирование
+
+    if CheckNotValidUser(UserID, FirmID, s) then raise EBOBError.Create(s);
+
+    // сначала проверяем, есть ли у пользователя право на такой запрос
+    if UserID<>Cache.arFirmInfo[FirmId].SUPERVISOR then begin
+      raise EBOBError.Create('У Вас нет прав на выполнение этого запроса.');
+    end;
+
+    // потом получаем список должн.лиц, исключая главного
+    j:= Length(Cache.arFirmInfo[FirmId].FirmClients)-1;
+    for i:=0 to j do begin
+      Person:= Cache.arClientInfo[Cache.arFirmInfo[FirmId].FirmClients[i]];
+      if (Person<>nil) and (Cache.arFirmInfo[FirmId].FirmClients[i]<>UserID) then
+        if (Person.Login='') then begin
+          if (Person.Mail<>'') and (Person.Post<>'') then begin
+            SetLength(NonUsers, Length(NonUsers)+1);
+            NonUsers[Length(NonUsers)-1]:= Cache.arFirmInfo[FirmId].FirmClients[i];
+          end;
+        end else begin
+          SetLength(Users, Length(Users)+1);
+          Users[Length(Users)-1]:= Cache.arFirmInfo[FirmId].FirmClients[i];
+        end;
+    end;
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+
+    Contracts:=Cache.arFirmInfo[FirmId].FirmContracts;
+    for ii:=0 to Contracts.Count-1 do begin
+      Contract:=Cache.Contracts[Contracts[ii]];
+      Stream.WriteInt(Contract.ID);
+      Stream.WriteStr(Contract.Name);
+      Stream.WriteInt(Contract.SysID);
+    end;
+
+    j:= Length(Users)-1;
+    Stream.WriteInt(j+1); // кол-во пользователей
+    for i:= 0 to j do begin
+      Person:=Cache.arClientInfo[Users[i]];
+      Stream.WriteInt(Users[i]); // код
+      Stream.WriteStr(Person.Name); // ФИО
+      Stream.WriteStr(Person.Post); // должность
+      Stream.WriteStr(Person.Login); // логин
+      for ii:= 0 to Contracts.Count-1 do begin
+        Stream.WriteBool(Person.CheckContract(Contracts[ii]));
+      end;
+    end;
+
+    j:= Length(NonUsers)-1;
+    Stream.WriteInt(j+1); // кол-во пользователей
+    for i:= 0 to j do begin
+      Stream.WriteInt(NonUsers[i]); // код
+      Stream.WriteStr(Cache.arClientInfo[NonUsers[i]].Name); // ФИО
+    end;
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  SetLength(Users, 0);
+  SetLength(NonUsers, 0);
+  Stream.Position:= 0;
+end; // prGetAllUsersInfo
+
+procedure prChangeContractAccess(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prChangeContractAccess'; // имя процедуры/функции
+var UserId, FirmID, Victim, Contract: integer;
+    Person: TClientInfo;
+    s: string;
+    AllowContract: boolean;
+begin
+  Stream.Position:= 0;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    Victim:= Stream.ReadInt;
+    Contract:= Stream.ReadInt;
+    AllowContract:= Stream.ReadBool;
+    prSetThLogParams(ThreadData,0,UserID,FirmID,'Victim='+IntToStr(Victim)+#13#10+'Contract='+IntToStr(Contract)+#13#10+'AllowContract='+BoBBoolToStr(AllowContract)+#13#10); // логирование
+
+    if CheckNotValidUser(UserID, FirmID, s) then raise EBOBError.Create(s);
+
+    // сначала проверяем, есть ли у пользователя право на такой запрос
+    if UserID<>Cache.arFirmInfo[FirmId].SUPERVISOR then begin
+      raise EBOBError.Create('У Вас нет прав на выполнение этого запроса.');
+    end;
+    if CheckNotValidUser(Victim, FirmID, s) then raise EBOBError.Create(s);
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+
+    Person:=Cache.arClientInfo[Victim];
+    if (AllowContract) then begin
+      Person.AddCliContract(Contract);
+    end else begin
+      Person.DelCliContract(Contract);
+    end;
+
+
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:= 0;
+end; // prChangeContractAccess
+
+
+procedure prSendOrderForChangePersonData(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prSendOrderForChangePersonData'; // имя процедуры/функции
+var UserId, FirmID: integer;
+    Person: TClientInfo;
+    Firm: TFirmInfo;
+    text: string;
+    lstBodyMail: TStringList;
+begin
+  Stream.Position:= 0;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+
+    prSetThLogParams(ThreadData,0,UserID,FirmID,''); // логирование
+    if CheckNotValidUser(UserID, FirmID, text) then raise EBOBError.Create(text);
+
+    text:= Stream.ReadStr;
+
+    Person:=Cache.arClientInfo[UserID];
+    Firm:=Cache.arFirmInfo[FirmID];
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+
+    lstBodyMail:= TStringList.Create;
+    lstBodyMail.Add('Пользователь '+Person.Name+' с логином "'+Person.Login+'" (контрагент '+Firm.Name+'['+Firm.UPPERSHORTNAME+']) отправил заявку на изменение персональных данных:'#13#10);
+    lstBodyMail.Add(text);
+    n_SysMailSend(Cache.GetConstItem(pcUIKdepartmentMail).StrValue, 'Заявка на изменение персональных данных клиента '+Person.Name+' (контрагент '+Firm.Name+'['+Firm.UPPERSHORTNAME+'])', lstBodyMail);
+
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:= 0;
+  prFree(lstBodyMail);
+end; // prSendOrderForChangePersonData
+
+
+procedure prSendOrderForAddContactPerson(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prSendOrderForAddContactPerson'; // имя процедуры/функции
+var UserId, FirmID: integer;
+    Person: TClientInfo;
+    Firm: TFirmInfo;
+    FIO, Post, Mail, Phones, s: string;
+    lstBodyMail: TStringList;
+begin
+  Stream.Position:= 0;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    FIO:= Stream.ReadStr;
+    Post:= Stream.ReadStr;
+    Mail:= Stream.ReadStr;
+    Phones:= Stream.ReadStr;
+    prSetThLogParams(ThreadData,0,UserID,FirmID,''); // логирование
+
+    if CheckNotValidUser(UserID, FirmID, s) then raise EBOBError.Create(s);
+
+    Person:=Cache.arClientInfo[UserID];
+    Firm:=Cache.arFirmInfo[FirmID];
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+
+    lstBodyMail:= TStringList.Create;
+    lstBodyMail.Add('Пользователь '+Person.Name+' с логином "'+Person.Login+'" - главный пользователь контрагента '
+                    +Firm.Name+'['+Firm.UPPERSHORTNAME+'] отправил заявку на добавление нового контактного лица:'#13#10);
+    lstBodyMail.Add('ФИО:');
+    lstBodyMail.Add(FIO);
+    lstBodyMail.Add('Должность');
+    lstBodyMail.Add(Post);
+    lstBodyMail.Add('Телефоны');
+    lstBodyMail.Add(Phones);
+    lstBodyMail.Add('Email');
+    lstBodyMail.Add(Mail);
+    n_SysMailSend(Cache.GetConstItem(pcUIKdepartmentMail).StrValue, 'Заявка на добавление контактного лица '+FIO+' (контрагент '+Firm.Name+'['+Firm.UPPERSHORTNAME+'])', lstBodyMail);
+
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:= 0;
+  prFree(lstBodyMail);
+end; // prSendOrderForAddContactPerson
+
+
+// Показать список брендов, участвующих в распродаже
+procedure prGetSaleBrands(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prGetSaleBrands'; // имя процедуры/функции
+//var
+//  GBIBDatabase: TIBDatabase;
+//  GBIBQuery: TIBSQL;
+//  ADSQuery: TADSQuery;
+//  UserId, FirmID, Qty: integer;
+//  s: string;
+//  DPRTName: string;
+//  InnerErrorPos: string;
+begin
+{
+  Stream.Position:=0;
+  GBIBQuery:= nil;
+  GBIBDatabase:= nil;
+  ADSQuery:= nil;
+  try
+    UserId:=Stream.ReadInt;
+    FirmId:=Stream.ReadInt;
+InnerErrorPos:='0';
+
+    prSetThLogParams(ThreadData,0,UserID,FirmID,''); // логирование
+
+    if not Cache.ClientExist(UserID) or not Cache.FirmExist(FirmId) then
+      raise Exception.Create('Ошибка запроса данных.');
+
+InnerErrorPos:='3';
+    ADSQuery:= fnNewADSQuery(MainConnection,'ADSQuery_'+nmProc,ThreadData.ID);
+    ADSQuery.SQL.Text:='Select * FROM WEBORDERCLIENTS WHERE WOCLCODE='+IntToStr(UserId);
+    ADSQuery.Open;
+InnerErrorPos:='4';
+    GBIBDatabase:= cntsGRB.GetFreeCnt;
+    GBIBQuery:= fnCreateNewIBSQL(GBIBDatabase,'GBIBQuery_'+nmProc,ThreadData.ID);
+InnerErrorPos:='5';
+//    Query.SQL.Text:= 'SELECT DPRTSHORTNAME FROM DEPARTMENT where DPRTCODE='+MainStorageCode;
+    GBIBQuery.Transaction.StartTransaction;
+    if Cache.ClientExist(UserId) then FirmId:= Cache.arClientInfo[UserId].FirmID;
+    if Cache.FirmExist(FirmID) and Cache.DprtExist(Cache.arFirmInfo[FirmID].MainStorageID) then
+      DPRTName:= Cache.arDprtInfo[Cache.arFirmInfo[FirmID].MainStorageID].ShortName
+    else DPRTName:= '';
+    if (DPRTName='') and Cache.FirmExist(FirmID) then begin
+      GBIBQuery.SQL.Text:= 'SELECT DPRTSHORTNAME FROM DEPARTMENT where DPRTCODE='+Cache.arFirmInfo[FirmID].MainStorageCode;
+  InnerErrorPos:='6';
+      GBIBQuery.ExecQuery;
+  InnerErrorPos:='7';
+      DPRTName:= GBIBQuery.FieldByName('DPRTSHORTNAME').AsString;     // Наименование филиала для заголовка таблицы
+      GBIBQuery.Close;
+    end;
+
+    s:= 'select vgr.kodgr, vgr.Name, count(*) qty from VLADGR vgr, VLADPGR g, wares W where g.KODPGR=W.waremastercode and g.kodgr=vgr.kodgr';
+    s:= s+' and W.WARECHILDCOUNT=0 and  W.warearchive="F" and (select rsalekey from GetWareSaleKey(w.warecode,"TODAY"))="T"';
+    s:= s+' and ((SELECT SUM(RESTCURRENT-RESTORDER) FROM WAREREST WHERE RESTWARECODE=w.WARECODE and RESTDPRTCODE not in ('+'-1))>0)';
+    s:= s+' group by vgr.kodgr, vgr.Name';
+    s:= s+' order by Name';
+    GBIBQuery.SQL.Text:= s;
+    GBIBQuery.Prepare;
+InnerErrorPos:='13';
+    GBIBQuery.ExecQuery;
+    Stream.Clear;
+InnerErrorPos:='14';
+    Qty:= 0;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+    Stream.WriteInt(0); // занимаем место под кол-во товаров (возвращаемых записей)
+//    Stream.WriteByte(fnIfInt(MainStorageCode='1', 2, 3));
+    Stream.WriteStr(DPRTName); //
+    Stream.WriteStr(fnIfStr(ADSQuery.FieldByname('WOCLSEARCHCURRENCY').AsString='1', 'грн.', 'у.е.')); //
+InnerErrorPos:='15';
+    while not GBIBQuery.EOF do begin
+      if GBIBQuery.FieldByName('qty').AsInteger>0 then begin
+        Stream.WriteInt(GBIBQuery.FieldByName('kodgr').AsInteger);    // код бренда
+        Stream.WriteStr(GBIBQuery.FieldByName('Name').AsString); //
+        Stream.WriteInt(GBIBQuery.FieldByName('qty').AsInteger);  //
+        Inc(Qty);
+      end;
+      GBIBQuery.Next;
+    end;
+    GBIBQuery.Close;
+    Stream.Position:= 4;
+InnerErrorPos:='22';
+    Stream.WriteInt(Qty); // записываем кол-во возвращаемых записей
+InnerErrorPos:='23';
+  except
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, 'InnerErrorPos='+InnerErrorPos);
+    end;
+  end;
+  prFreeAdsQuery(AdsQuery);
+  prFreeIBSQL(GBIBQuery);
+  cntsGRB.SetFreeCnt(GBIBDatabase);
+  Stream.Position:=0;
+}
+end;  // prGetSaleBrands
+
+procedure prGetWaresFromAccountList(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prGetWaresFromAccountList'; // имя процедуры/функции
+var
+  GBIBDatabase: TIBDatabase;
+  GBIBQuery: TIBSQL;
+  i, UserId, FirmID, ii: integer;
+  SortOrder, SortDesc, s: string;
+  Ware: TWareInfo;
+  contID: Integer;
+  Client: TClientInfo;
+begin
+  Stream.Position:= 0;
+  GBIBQuery:= nil;
+  GBIBDatabase:= nil;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    SortOrder:= Stream.ReadStr;
+    SortDesc:= Stream.ReadStr;
+    prSetThLogParams(ThreadData,0,UserID,FirmID,'SortOrder='+SortOrder+#13#10+'SortDesc='+SortDesc); // логирование
+
+    if CheckNotValidUser(UserID, FirmID, s) then raise EBOBError.Create(s);
+
+    Client:= Cache.arClientInfo[UserID];
+    ContID:= Client.GetCliCurrContID;  // код текущего/доступного контракта клиента
+
+    GBIBDatabase:= cntsGRB.GetFreeCnt;
+    GBIBQuery:= fnCreateNewIBSQL(GBIBDatabase,'GBIBQuery_'+nmProc,ThreadData.ID);
+    GBIBQuery.Transaction.StartTransaction;
+//--------------------------------------------------------------------------------------------------
+
+//------------------------------------------------------------------------ //
+    GBIBQuery.SQL.Text:= 'select PINVLNWARECODE DCACLNWARECODE, '+
+      ' WAREOFFICIALNAME, PINVLNCOUNT DCACLNCOUNT, rPROCESSED DCACPROCESSED,'+
+      ' PINVLNPRICE DCACLNPRICE, rPInvCrnc DCACCRNCCODE, rPInvCode DCACCODE,'+
+      ' rPInvNumber DCACNUMBER, rPInvDate DCACDATE, rContCode'+
+      ' from Vlad_CSS_GetFirmReserveDocs('+IntToStr(FirmID)+ ', '+
+      fnIfStr(Client.DocsByCurrContr, IntToStr(contID), '0')+')'+
+      ' left join PAYINVOICELINES on PINVLNDOCMCODE=rPInvCode and PINVLNCOUNT>0'+
+      ' left join WARES on WARECODE=PINVLNWARECODE'+
+      ' ORDER BY '+SortOrder+' '+SortDesc+', WAREOFFICIALNAME '+SortDesc+
+      ', DCACDATE '+SortDesc+', DCACNUMBER '+SortDesc;
+    GBIBQuery.Prepare;
+    GBIBQuery.ExecQuery;
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+    Stream.WriteInt(0); // забиваем место под кол-во
+    i:= 0;
+    while not GBIBQuery.EOF do begin
+      //------------------------------- фильтр по контрактам
+      ii:= GBIBQuery.FieldByName('rContCode').AsInteger;
+      if (ii<1) then s:= ''                                  // контракт неопределен
+      else if (Client.CliContracts.IndexOf(ii)<0) or         // контракт недоступен
+        (Client.DocsByCurrContr and (ii<>ContID)) then begin // выдаем только по текущему
+        GBIBQuery.Next;
+        Continue;
+      end else s:= Client.GetCliContract(ii).Name;
+
+      Ware:= Cache.GetWare(GBIBQuery.FieldByName('DCACLNWARECODE').AsInteger);
+      Stream.WriteStr(Ware.WareBrandName);
+      Stream.WriteStr(GBIBQuery.FieldByName('WAREOFFICIALNAME').AsString);
+      Stream.WriteDouble(GBIBQuery.FieldByName('DCACLNCOUNT').AsFloat);
+      Stream.WriteDouble(GBIBQuery.FieldByName('DCACLNPRICE').AsFloat);
+      Stream.WriteStr(Cache.GetCurrName(GBIBQuery.FieldByName('DCACCRNCCODE').AsInteger, True));
+      Stream.WriteStr(s);  // наименование контракта
+      Stream.WriteByte(fnIfInt((GBIBQuery.FieldByName('DCACPROCESSED').AsString='T'), byte('t'), byte('f')));
+      Stream.WriteStr(GBIBQuery.FieldByName('DCACCODE').AsString);
+      Stream.WriteStr(GBIBQuery.FieldByName('DCACNUMBER').AsString+fnIfStr(GBIBQuery.FieldByName('DCACPROCESSED').AsString='T', ' &#8730;', ''));
+      Stream.WriteStr(FormatDateTime('dd.mm.yy', GBIBQuery.FieldByName('DCACDATE').AsDateTime));
+      GBIBQuery.Next;
+      Inc(i);
+    end;
+    GBIBQuery.Close;
+    Stream.Position:= 4;
+    Stream.WriteInt(i); // передаем кол-во
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr('в процедуре '+nmProc+' '+E.Message);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  prFreeIBSQL(GBIBQuery);
+  cntsGRB.SetFreeCnt(GBIBDatabase);
+  Stream.Position:= 0;
+end; //prGetWaresFromAccountList
+
+procedure prShowGBOutInvoice(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prShowGBOutInvoice'; // имя процедуры/функции
+var
+  GBIBDatabase: TIBDatabase;
+  GBIBQuery: TIBSQL;
+  UserId, FirmID, LineCount, Pos: integer;
+  OutInvoiceID, Summa, s: string;
+  Ware: TWareInfo;
+  Client: TClientInfo;
+begin
+  Stream.Position:= 0;
+  GBIBQuery:= nil;
+  GBIBDatabase:= nil;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    OutInvoiceID:= Stream.ReadStr;
+    prSetThLogParams(ThreadData,0,UserID,FirmID,'OutInvoiceID='+OutInvoiceID); // логирование
+
+    GBIBDatabase:= cntsGRB.GetFreeCnt;
+    GBIBQuery:= fnCreateNewIBSQL(GBIBDatabase,'GBIBQuery_'+nmProc,ThreadData.ID);
+    GBIBQuery.Transaction.StartTransaction;
+
+    if CheckNotValidUser(UserID, FirmID, s) then raise EBOBError.Create(s);
+    Client:=Cache.arClientInfo[UserID];
+    s:= fnIntegerListToStr(Client.CliContracts); // TIntegerList - в строку через запятую
+
+
+    GBIBQuery.SQL.Text:= 'SELECT INVCNUMBER OTINNUMBER, INVCDATE OTINDATE,'+
+      ' INVCSUMM OTINSUMM, INVCCRNCCODE OTINCRNCCODE, bc.bnclcalcbonussumm'+
+      ' from INVOICEREESTR '+
+      ' left outer join bonuscalculations bc on bc.bncldocmcode=INVOICEREESTR.invccode and bc.bncldocmtype='+IntToStr(docInvoice)+
+      ' where INVCCODE='+OutInvoiceID+
+      ' and INVCRECIPIENTCODE='+IntToStr(FirmId)+
+      ' and INVCCONTRACTCODE in ('+s+')'
+      ;
+
+
+    GBIBQuery.ExecQuery;
+    if GBIBQuery.Bof and GBIBQuery.Eof then begin
+      raise EBOBError.Create('Не найдена накладная с id='+OutInvoiceID);
+    end;
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+    Stream.WriteStr(GBIBQuery.FieldByName('OTINNUMBER').AsString);
+    Stream.WriteStr(FormatDateTime('dd.mm.yy', GBIBQuery.FieldByName('OTINDATE').AsDateTime));
+    Summa:= FormatFloat('# ##0.00', GBIBQuery.FieldByName('OTINSUMM').AsFloat)+' '+
+            Cache.GetCurrName(GBIBQuery.FieldByName('OTINCRNCCODE').AsInteger, True);
+    Stream.WriteDouble(GBIBQuery.FieldByName('bnclcalcbonussumm').AsDouble);
+    Stream.WriteStr(Cache.GetCurrName(Cache.BonusCrncCode, True));
+
+    LineCount:= 0;            // счетчик - кол-во строк
+    Pos:= Stream.Position;
+    Stream.WriteInt(0); //  место под кол-во строк
+
+    GBIBQuery.Close;
+
+    GBIBQuery.SQL.Text:= 'select INVCLNWARECODE OTINLNWARECODE,'+
+      ' INVCLNCOUNT OTINLNCOUNT, INVCLNPRICE OTINLNPRICE'+
+      ' from INVOICELINES where INVCLNDOCMCODE='+OutInvoiceID;
+
+    GBIBQuery.ExecQuery;
+    while not GBIBQuery.EOF do begin
+      Ware:= Cache.GetWare(GBIBQuery.FieldByName('OTINLNWARECODE').AsInteger);
+      if (Ware=nil) or (Ware=NoWare) then raise EBOBError.Create('Не найден заданный товар');
+      Stream.WriteStr(Ware.WareBrandName);
+      Stream.WriteStr(Ware.Name);
+      Stream.WriteStr(GBIBQuery.FieldByName('OTINLNCOUNT').AsString);
+      Stream.WriteStr(Ware.MeasName);
+      Stream.WriteStr(FormatFloat('# ##0.00', GBIBQuery.FieldByName('OTINLNPRICE').AsFloat));
+      Stream.WriteStr(FormatFloat('# ##0.00', RoundToHalfDown(GBIBQuery.FieldByName('OTINLNPRICE').AsFloat*GBIBQuery.FieldByName('OTINLNCOUNT').AsFloat,-2)));
+      inc(LineCount);
+      GBIBQuery.Next;
+    end;
+    GBIBQuery.Close;
+    Stream.WriteStr(Summa);
+    Stream.Position:= Pos;
+    Stream.WriteInt(LineCount);
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(' в процедуре '+nmProc+': '+E.Message);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  prFreeIBSQL(GBIBQuery);
+  cntsGRB.SetFreeCnt(GBIBDatabase);
+  Stream.Position:= 0;
+end; // prShowGBOutInvoice
+
+procedure prShowGBBack(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prShowGBBack'; // имя процедуры/функции
+var
+  GBIBDatabase: TIBDatabase;
+  GBIBQuery: TIBSQL;
+  UserId, FirmID, LineCount, Pos: integer;
+  OutInvoiceID, Summa, s: string;
+  Client: TClientInfo;
+begin
+  Stream.Position:= 0;
+  GBIBQuery:= nil;
+  GBIBDatabase:= nil;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    OutInvoiceID:= Stream.ReadStr;
+    prSetThLogParams(ThreadData,0,UserID,FirmID,'DocID='+OutInvoiceID); // логирование
+    if CheckNotValidUser(UserID, FirmID, s) then raise EBOBError.Create(s);
+    Client:=Cache.arClientInfo[UserID];
+    s:= fnIntegerListToStr(Client.CliContracts); // TIntegerList - в строку через запятую
+
+    GBIBDatabase:= cntsGRB.GetFreeCnt;
+    GBIBQuery:= fnCreateNewIBSQL(GBIBDatabase,'GBIBQuery_'+nmProc,ThreadData.ID);
+    GBIBQuery.Transaction.StartTransaction;
+//--------------------------------------------------------------------------------------------------
+    GBIBQuery.SQL.Text:= 'SELECT RTINNUMBER RETNNUMBER, RTINDATE RETNDATE,'+
+      ' RTINSUMM RETNSUMM, RTINCRNCCODE RETNCRNCCODE, bc.bnclcalcbonussumm'+
+      ' from RETURNINVOICEREESTR '+
+      ' left outer join bonuscalculations bc on bc.bncldocmcode=RETURNINVOICEREESTR.retncode and bc.bncldocmtype='+IntToStr(docBackInvoice)+
+      ' where RTINCODE='+OutInvoiceID+
+      ' and RTINRECIPIENTCODE='+IntToStr(FirmId)+
+      ' and RTINCONTRACTCODE in ('+s+')'
+      ;
+//---------------------------------------------------------------------------------------------------
+//      GBIBQuery.SQL.Text:= 'SELECT RETINVOICEREESTR.*, CRNCSHORTNAME'+
+  //      ', (select count(*) from RETINVOICELINES where RETNLNDOCMCODE='+OutInvoiceID+') as countlines'+
+//        ' from RETINVOICEREESTR, CURRENCY where RETNCODE='+OutInvoiceID+
+//        ' and RETNFIRMCODE='+IntToStr(FirmId)+' and CRNCCODE=RETNCRNCCODE';
+    GBIBQuery.ExecQuery;
+    if GBIBQuery.Bof and GBIBQuery.Eof then begin
+      raise EBOBError.Create('Не найдена возвратная накладная с id='+OutInvoiceID);
+    end;
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+    Stream.WriteStr(GBIBQuery.FieldByName('RETNNUMBER').AsString);
+    Stream.WriteStr(FormatDateTime('dd.mm.yy', GBIBQuery.FieldByName('RETNDATE').AsDateTime));
+    Summa:= FormatFloat('# ##0.00', GBIBQuery.FieldByName('RETNSUMM').AsFloat)+
+      ' '+Cache.GetCurrName(GBIBQuery.FieldByName('RETNCRNCCODE').AsInteger, True);
+    Stream.WriteDouble(GBIBQuery.FieldByName('bnclcalcbonussumm').AsDouble);
+    Stream.WriteStr(Cache.GetCurrName(Cache.BonusCrncCode, True));
+
+    LineCount:= 0;            // счетчик - кол-во строк
+    Pos:= Stream.Position;
+    Stream.WriteInt(0); //  место под кол-во строк
+//    Stream.WriteInt(GBIBQuery.FieldByName('countlines').AsInteger);
+    GBIBQuery.Close;
+//--------------------------------------------------------------------------------------------------
+    GBIBQuery.SQL.Text:= 'select RTINLNWARECODE RETNLNWARECODE,'+
+      ' RTINLNCOUNT RETNLNCOUNT, RTINLNPRICE RETNLNPRICE, RTINLNUNITCODE'+
+      ' from RETURNINVOICELINES where RTINLNDOCMCODE='+OutInvoiceID;
+//---------------------------------------------------------------------------------------------------
+//      GBIBQuery.SQL.Text:= 'select RETINVOICELINES.*, MEASNAME, WAREOFFICIALNAME,'+
+//        ' (select WAREOFFICIALNAME from wares ww where ww.WareCode=g.PGRVLAD) BRAND'+
+//        ' from RETINVOICELINES, MEASURE, WARES w inner join VLADPGR g on g.KODPGR=w.waremastercode'+
+//        ' where RETNLNDOCMCODE='+OutInvoiceID+' and WAREMEAS=MEASCODE and WARECODE=RETNLNWARECODE';
+    GBIBQuery.ExecQuery;
+    while not GBIBQuery.EOF do begin
+//--------------------------------------------------------------------------------------------------
+      with Cache.GetWare(GBIBQuery.FieldByName('RETNLNWARECODE').AsInteger) do begin
+        Stream.WriteStr(GrpName);  
+        Stream.WriteStr(Name);
+      end;
+      Stream.WriteStr(GBIBQuery.FieldByName('RETNLNCOUNT').AsString);
+      Stream.WriteStr(Cache.GetMeasName(GBIBQuery.FieldByName('RTINLNUNITCODE').AsInteger));
+//--------------------------------------------------------------------------------------------------- 
+//        Stream.WriteStr(GBIBQuery.FieldByName('BRAND').AsString);
+//        Stream.WriteStr(GBIBQuery.FieldByName('WAREOFFICIALNAME').AsString);
+//        Stream.WriteStr(GBIBQuery.FieldByName('RETNLNCOUNT').AsString);
+//        Stream.WriteStr(GBIBQuery.FieldByName('MEASNAME').AsString);
+      Stream.WriteStr(FormatFloat('# ##0.00', GBIBQuery.FieldByName('RETNLNPRICE').AsFloat));
+      Stream.WriteStr(FormatFloat('# ##0.00', RoundToHalfDown(GBIBQuery.FieldByName('RETNLNPRICE').AsFloat*GBIBQuery.FieldByName('RETNLNCOUNT').AsFloat,-2)));
+      inc(LineCount);
+      GBIBQuery.Next;
+    end;
+    GBIBQuery.Close;
+    Stream.WriteStr(Summa);
+    Stream.Position:= Pos;
+    Stream.WriteInt(LineCount);
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(' в процедуре '+nmProc+': '+E.Message);
+//      prMessageLOG('Ошибка в процедуре prShowGBBack: '#13#10+E.Message+#13#10'FirmID='+IntToStr(FirmID)+' UserID='+IntToStr(UserID));
+//      prMessageLOG('Ошибка в процедуре prShowGBBack: '#13#10+E.Message+#13#10'FirmID='+IntToStr(FirmID)+' UserID='+IntToStr(UserID), 'Web', false);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  prFreeIBSQL(GBIBQuery);
+  cntsGRB.SetFreeCnt(GBIBDatabase);
+  Stream.Position:= 0;
+end; // prShowGBBack
+
+procedure prGetUnpayedDocs(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prGetUnpayedDocs'; // имя процедуры/функции
+var
+  GBIBDatabase: TIBDatabase;
+  GBIBQuery: TIBSQL;
+  UserId, FirmID, i, index: integer;
+  Currencies: tai;
+  RedSumms, VioletSumms: array of double;
+  ShowRed, ShowViolet: boolean;
+  contID, ii: Integer;
+  sum: double;
+  Client: TClientInfo;
+  s: String;
+
+  function fnGetWarningText(Summs: array of double): string;
+  var
+    s: string;
+    i: integer;
+  begin
+    s:='';
+    for i:=0 to Length(Summs)-1 do begin
+      if Summs[i]>0 then begin
+        if s<>'' then s:=s+', ';
+        s:=s+' '+FormatFloat('# ##0.00', Summs[i])+' '+Cache.GetCurrName(Currencies[i], True);
+      end;
+    end;
+    Result:=s;
+  end;
+begin
+  Stream.Position:= 0;
+  GBIBQuery:= nil;
+  GBIBDatabase:= nil;
+  SetLength(Currencies, 0);
+  SetLength(RedSumms, 0);
+  SetLength(VioletSumms, 0);
+  ShowRed:=false;
+  ShowViolet:=false;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+
+    prSetThLogParams(ThreadData,0,UserID,FirmID,''); // логирование
+
+    if CheckNotValidUser(UserID, FirmID, s) then raise EBOBError.Create(s);
+
+    Client:= Cache.arClientInfo[UserID];
+    ContID:= Client.GetCliCurrContID;  // код текущего/доступного контракта клиента
+
+    GBIBDatabase:= cntsGRB.GetFreeCnt;
+    GBIBQuery:= fnCreateNewIBSQL(GBIBDatabase, 'GBIBQuery_'+nmProc, ThreadData.ID);
+
+    GBIBQuery.SQL.Text:= 'select rDocmTYPE, rDocmCODE, rDocmDate, rDocmCrnc RCrncCode,'+
+      ' rDocmDuty RDutySumm, rDocmDPRT DPRTCODE, rDocmDELAY DELAYCALC,'+
+      ' rDocmSUMM DTLNSUMM, rDocmNUMBER DTLNNUMBER, rContCode from'+
+      ' Vlad_CSS_GetFirmDutyDocms('+IntToStr(FirmID)+ ', '+
+      fnIfStr(Client.DocsByCurrContr, IntToStr(contID), '0')+', '+
+      Cache.GetConstItem(pcDutyDocsWithPlan).StrValue+')';
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+    Stream.WriteInt(0); // место под кол-во строк
+    GBIBQuery.Transaction.StartTransaction;
+    GBIBQuery.ExecQuery;
+    i:= 0;
+    while not GBIBQuery.EOF do begin
+      //------------------------------- фильтр по контрактам +++
+      ii:= GBIBQuery.FieldByName('rContCode').AsInteger;
+      if (ii<1) then s:= ''                                  // контракт неопределен
+      else if (Client.CliContracts.IndexOf(ii)<0) or         // контракт недоступен
+        (Client.DocsByCurrContr and (ii<>ContID)) then begin // выдаем только по текущему
+        GBIBQuery.Next;
+        Continue;
+      end else s:= Client.GetCliContract(ii).Name;
+      //------------------------------- фильтр по контрактам ---
+
+      Stream.WriteInt(GBIBQuery.FieldByName('RDOCMTYPE').AsInteger); // код типа документа
+      Stream.WriteStr(FormatDateTime('dd.mm.yy', GBIBQuery.FieldByName('RDOCMDATE').AsDateTime));  // дата документа
+      Stream.WriteStr(GBIBQuery.FieldByName('RDOCMCODE').AsString);  // код документа (id)
+      Stream.WriteStr(GBIBQuery.FieldByName('DTLNNUMBER').AsString); // номер документа
+//      Stream.WriteStr(FormatFloat('# ##0.00', GBIBQuery.FieldByName('DTLNSUMM').AsFloat/100)); // сумма документа
+//      Stream.WriteStr(FormatFloat('# ##0.00', GBIBQuery.FieldByName('RDUTYSUMM').AsFloat)); // неоплаченная сумма
+      sum:= RoundToHalfDown(GBIBQuery.FieldByName('DTLNSUMM').AsFloat);
+      Stream.WriteStr(FormatFloat('# ##0.00', sum)); // сумма документа
+      sum:= RoundToHalfDown(GBIBQuery.FieldByName('RDUTYSUMM').AsFloat);
+      Stream.WriteStr(FormatFloat('# ##0.00', sum)); // неоплаченная сумма
+      Stream.WriteStr(Cache.GetCurrName(GBIBQuery.FieldByName('RCrncCode').AsInteger, True)); // валюта документа
+      Stream.WriteStr(s);  // наименование контракта
+      if (fnInIntArray(GBIBQuery.FieldByName('RCrncCode').AsInteger, Currencies)=-1) then begin
+        prAddItemToIntArray(GBIBQuery.FieldByName('RCrncCode').AsInteger, Currencies);
+        index:=Length(Currencies);
+        SetLength(RedSumms, index);
+        SetLength(VioletSumms, index);
+        RedSumms[index-1]:=0;
+        VioletSumms[index-1]:=0;
+      end;
+      if ((Trunc(GBIBQuery.FieldByName('RDOCMDATE').AsDateTime)+GBIBQuery.FieldByName('DELAYCALC').AsInteger)<Date) then begin
+        Stream.WriteByte(2); // красный код
+        index:=fnInIntArray(GBIBQuery.FieldByName('RCrncCode').AsInteger, Currencies);
+        RedSumms[index]:=RedSumms[index]+GBIBQuery.FieldByName('RDUTYSUMM').AsFloat; // неоплаченная сумма
+        ShowRed:=true;
+      end else if ((Trunc(GBIBQuery.FieldByName('RDOCMDATE').AsDateTime)+GBIBQuery.FieldByName('DELAYCALC').AsInteger-Date)<constDaysForBlockWarninig) then begin
+        Stream.WriteByte(1); // фиолетовый код
+        index:=fnInIntArray(GBIBQuery.FieldByName('RCrncCode').AsInteger, Currencies);
+        VioletSumms[index]:=VioletSumms[index]+GBIBQuery.FieldByName('RDUTYSUMM').AsFloat; // неоплаченная сумма
+        ShowViolet:=true;
+      end else Stream.WriteByte(0);
+      Stream.WriteInt(Trunc(GBIBQuery.FieldByName('RDOCMDATE').AsDateTime+GBIBQuery.FieldByName('DELAYCALC').AsInteger));
+//---------------------------------------------------------------------------------------------------
+//        Stream.WriteStr(fnIfStr(GBIBQuery.FieldByName('CRNCSHORTNAME').AsString='eur', 'у.е.', GBIBQuery.FieldByName('CRNCSHORTNAME').AsString)); // валюта документа
+//        if (GBIBQuery.FieldByName('RDOCMTYPE').AsInteger=53) and GBIBQuery.FieldByName('OTINDELAY').IsNull then begin
+//          Stream.WriteInt(Trunc(GBIBQuery.FieldByName('RDOCMDATE').AsDateTime+GBIBQuery.FieldByName('DELAYCALC').AsInteger)+1);
+//        end else begin
+//          Stream.WriteInt(Trunc(GBIBQuery.FieldByName('RDOCMDATE').AsDateTime+GBIBQuery.FieldByName('OTINDELAY').AsInteger)+1);
+//        end;
+      GBIBQuery.Next;
+      Inc(i)
+    end;
+    if ShowRed then begin
+      Stream.WriteByte(2);
+      Stream.WriteStr('По просроченным документам необходимо оплатить '+fnGetWarningText(RedSumms));
+    end else if ShowViolet then begin
+      Stream.WriteByte(1);
+      Stream.WriteStr('В ближайшее время необходимо оплатить '+fnGetWarningText(VioletSumms));
+    end else Stream.WriteByte(0);
+
+    GBIBQuery.Close;
+    Stream.Position:= 4;
+    Stream.WriteInt(i); // кол-во строк
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr('в процедуре '+nmProc+': '+E.Message);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  prFreeIBSQL(GBIBQuery);
+  cntsGRB.SetFreeCnt(GBIBDatabase);
+  Stream.Position:= 0;
+  SetLength(Currencies, 0);
+  SetLength(RedSumms, 0);
+  SetLength(VioletSumms, 0);
+end; //prGetUnpayedDocs
+
+// сверка
+procedure prGetCheck(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prGetCheck'; // имя процедуры/функции
+var
+  GBIBDatabase: TIBDatabase;
+  GBIBQuery: TIBSQL;
+  UserId, FirmID, i, ii: integer;
+  DateBegin, DateEnd, DateMin, DateTemp : TDateTime;
+  CurrCode: string;
+  c, s: string;
+  DebtUAH, DebtEUR: double;
+  contID: integer;
+  Client: TClientInfo;
+  Contract: TContract;
+begin
+  Stream.Position:= 0;
+  GBIBQuery:= nil;
+  GBIBDatabase:= nil;
+  contID:= 0;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    ContID:= Stream.ReadInt; // для контрактов
+
+    DateBegin:= Trunc(Stream.ReadDouble);
+    DateEnd:= Trunc(Stream.ReadDouble);
+
+    prSetThLogParams(ThreadData, 0, UserID, FirmID, 'DateBegin='+FormatDateTime('dd.mm.yy', DateBegin)+
+      #13#10+'DateEnd='+FormatDateTime('dd.mm.yy', DateEnd)+#13#10'ContID='+IntToStr(ContID)); // логирование
+//      #13#10+'DateEnd='+FormatDateTime('dd.mm.yy', DateEnd)); // логирование
+
+    if CheckNotValidUser(UserID, FirmID, s) then raise EBOBError.Create(s);
+
+    Client:= Cache.arClientInfo[UserID];
+    Contract:= Client.GetCliContract(contID);
+
+    s:= fnIntegerListToStr(Client.CliContracts);
+
+    If DateEnd<DateBegin then begin
+      DateTemp:= DateEnd;
+      DateEnd:= DateBegin;
+      DateBegin:= DateTemp;
+    end;
+    if DateEnd>Date() then DateEnd:= Date();
+    //определяю минимально возможную дату начала отчета
+    DateMin:=IncMonth(EncodeDate(CurrentYear, CurrentMonth, 1), -1);
+    if DateBegin<DateMin then DateBegin:=DateMin;
+    CurrCode:=Stream.ReadStr;
+
+    GBIBDatabase:= cntsGRB.GetFreeCnt;
+    GBIBQuery:= fnCreateNewIBSQL(GBIBDatabase,'GBIBQuery_'+nmProc,ThreadData.ID);
+    GBIBQuery.Transaction.StartTransaction;
+
+    DebtEUR:= 0;
+    DebtUAH:= 0;
+
+    GBIBQuery.SQL.Text:= 'select ABDTCURRECYCODE DUTYCRNCCODE, ABDTSUMM DUTYCURRENT'+
+      ' from ABSOLUTEDUTY where ABDTCURRECYCODE in (1, 10) and ABDTFIRMCODE='+IntToStr(FirmId)+
+      ' and ABDTCONTRACTCODE'+fnIfStr(Client.DocsByCurrContr, '='+IntToStr(contID), ' in ('+s+')');
+
+    GBIBQuery.ExecQuery;
+    while not GBIBQuery.Eof do begin
+      if GBIBQuery.FieldByName('DUTYCRNCCODE').AsInteger=1 then begin
+        DebtUAH:= DebtUAH+GBIBQuery.FieldByName('DUTYCURRENT').AsFloat;
+      end else begin
+        DebtEUR:= DebtEUR+GBIBQuery.FieldByName('DUTYCURRENT').AsFloat;
+      end;
+      GBIBQuery.Next;
+    end;
+    GBIBQuery.Close;
+
+    if ((CurrCode<>'1') and (CurrCode<>'10')) then CurrCode:= Contract.CredCurrStr;
+
+//------------------------------------------------------------------------- //
+{    GBIBQuery.SQL.Text:= 'select (select sum(TRNSSUMM) from TRANSACTIONS'+
+      ' where TRNSFIRMCODE=f.firmcode and TRNSCRNCCODE='+CurrCode+' and TRNSCONTRACTCODE'+
+      fnIfStr(Client.DocsByCurrContr, '='+IntToStr(contID), ' in ('+s+')')+
+      ' and TRNSDATE<:DateBegin and TRNSUSERTRANSACTIONKEY="F")'+ // оплаты, возвраты
+      '-(select sum(TRNSSUMM) from TRANSACTIONS'+
+      ' where TRNSFIRMCODE=f.firmcode and TRNSCRNCCODE='+CurrCode+' and TRNSCONTRACTCODE'+
+      fnIfStr(Client.DocsByCurrContr, '='+IntToStr(contID), ' in ('+s+')')+
+      ' and TRNSDATE<:DateBegin and TRNSUSERTRANSACTIONKEY="T")'+ // накладные
+      ' from firms f where firmcode='+IntToStr(FirmId);      }
+    if Client.DocsByCurrContr then
+      GBIBQuery.SQL.Text:= 'select rDuty from GETDUTYONDATE(:DateBegin, '+
+        IntToStr(FirmId)+', 1, '+CurrCode+', '+IntToStr(contID)+', 0)'
+    else
+      GBIBQuery.SQL.Text:= 'select sum(rDuty) from contract'+
+        ' left join GETDUTYONDATE(:DateBegin, '+IntToStr(FirmId)+', 1, '+
+        CurrCode+', contcode, 0) on 1=1 where contcode in ('+s+')';
+//------------------------------------------------------------------------- //
+
+    GBIBQuery.Prepare;
+    GBIBQuery.ParamByName('DateBegin').AsDateTime:= DateBegin;
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+    Stream.WriteInt(0); // место под кол-во строк
+    Stream.WriteDouble(DebtUAH/100); // Задолженность на текущий момент в грн
+    Stream.WriteDouble(DebtEUR/100); // Задолженность на текущий момент в у.е.
+    Stream.WriteDouble(DateBegin);   // Дата начала сверки
+    Stream.WriteDouble(DateEnd);     // Дата окончания сверки
+    Stream.WriteStr(fnIfStr(CurrCode='1', 'гривне','у.е.')); // валюта сверки (для отображения с заголовке)
+    Stream.WriteDouble(DateMin);     // Минимально возможная дата (чтоб не вычислять ее на клиенте) начала сверки
+    Stream.WriteDouble(Date());      // Максиимально возможная дата (чтоб не вычислять ее на клиенте) конца сверки
+
+    GBIBQuery.ExecQuery;
+    i:= 0;
+    Stream.WriteDouble(GBIBQuery.Fields[0].AsFloat/100); // Начальное сальдо сверки
+    GBIBQuery.Close;
+
+//-------------------------------------------------------------------------------------------------- //
+    GBIBQuery.SQL.Text:= 'select rSUMM DTLNSUMM, rDATE DTLNDATE, rDOCMTYPE DTLNDOCMTYPE,'+
+      ' rDOCMCODE DTLNDOCMCODE, rDUTYTYPE DTLNDUTYTYPE, rNUMBER DTLNNUMBER, rContCode'+
+      ' from Vlad_CSS_GetFirmCheckDocs('+IntToStr(FirmId)+', '+
+      fnIfStr(Client.DocsByCurrContr, IntToStr(contID), '0')+', :DateBegin, :DateEnd)'+
+      ' where rCRNC='+CurrCode;
+    GBIBQuery.ParamByName('DateBegin').AsDateTime:= DateBegin;
+    GBIBQuery.ParamByName('DateEnd').AsDateTime:= DateEnd;
+    GBIBQuery.ExecQuery;
+
+    while not GBIBQuery.EOF do begin
+      //------------------------------- фильтр по контрактам +++
+      ii:= GBIBQuery.FieldByName('rContCode').AsInteger;
+      if (ii<1) then s:= ''                                  // контракт неопределен
+      else if (Client.CliContracts.IndexOf(ii)<0) or         // контракт недоступен
+        (Client.DocsByCurrContr and (ii<>ContID)) then begin // выдаем только по текущему
+        GBIBQuery.Next;
+        Continue;
+      end else s:= Client.GetCliContract(ii).Name;
+      //------------------------------- фильтр по контрактам ---
+
+      c:=GBIBQuery.FieldByName('DTLNDUTYTYPE').AsString;                 // тип задолженности  0 - дебет, 5 - кредит
+      Stream.WriteByte(byte(c[1]));                                  // тип задолженности
+      Stream.WriteDouble(GBIBQuery.FieldByName('DTLNDATE').AsDateTime);  // дата документа
+      Stream.WriteInt(GBIBQuery.FieldByName('DTLNDOCMTYPE').AsInteger);  // код типа документа
+      Stream.WriteStr(GBIBQuery.FieldByName('DTLNDOCMCODE').AsString);   // код документа (id)
+      Stream.WriteStr(GBIBQuery.FieldByName('DTLNNUMBER').AsString);     // номер документа
+      Stream.WriteDouble(GBIBQuery.FieldByName('DTLNSUMM').AsFloat/100); // сумма документа
+      Stream.WriteStr(s);  // наименование контракта
+      GBIBQuery.Next;
+      Inc(i)
+    end;
+    GBIBQuery.Close;
+    Stream.Position:=4;
+    Stream.WriteInt(i); // кол-во строк
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      if Assigned(GBIBQuery) then s:= GBIBQuery.SQL.Text else s:= '';
+      Stream.WriteStr('в процедуре '+nmProc+': '+E.Message+fnIfStr(s='', '', #13#10)+s);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, s);
+    end;
+  end;
+  prFreeIBSQL(GBIBQuery);
+  cntsGRB.SetFreeCnt(GBIBDatabase);
+  Stream.Position:= 0;
+end; //prGetCheck
+
+procedure prSendMessage2Manager(Stream: TBoBMemoryStream; ThreadData: TThreadData);// отправить менеджеру письмо
+const nmProc = 'prSendMessage2Manager'; // имя процедуры/функции
+var
+  GBIBDatabase: TIBDatabase;
+  GBIBQuery: TIBSQL;
+  UserId, FirmID,FilialID: integer;
+  Mess, s, To_, From: string;
+  Strings: TStrings;
+  firma: TFirmInfo;
+  contID: Integer;
+begin
+  Stream.Position:= 0;
+  GBIBQuery:= nil;
+  GBIBDatabase:= nil;
+  contID:= 0;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    ContID:= Stream.ReadInt; // для контрактов
+    Mess:= Stream.ReadStr;
+
+    prSetThLogParams(ThreadData,0,UserID,FirmID,'Mess='+Mess); // логирование
+    Strings:= TStringList.Create;
+
+    if Cache.ClientExist(UserID) then begin
+      From:= Cache.arClientInfo[UserID].Mail;
+      Mess:= Mess+#13#10#13#10'C уважением, '#13#10+ StringOfChar(' ', 8)+Cache.arClientInfo[UserID].Name+', ';
+    end;
+    if trim(From)='' then
+      raise EBOBError.Create('Отправка сообщения невозможна - Вашего e-mail нет в базе данных. Для внесения е-mail в базу сообщите свои логин и e-mail торговому представителю Компании.');
+
+    if Cache.FirmExist(FirmId) then begin
+      firma:= Cache.arFirmInfo[FirmID];
+      Mess:= Mess+firma.Name;
+      FilialID:= firma.GetContract(contID).Filial;
+    end else begin
+      GBIBDatabase:= cntsGRB.GetFreeCnt;
+      GBIBQuery:= fnCreateNewIBSQL(GBIBDatabase,'GBIBQuery_'+nmProc,ThreadData.ID);
+      GBIBQuery.Transaction.StartTransaction;
+      GBIBQuery.SQL.Text:= 'SELECT FIRMMAINNAME FROM FIRMS WHERE FIRMCODE='+IntToStr(FirmId);
+      GBIBQuery.ExecQuery;
+      Mess:= Mess+GBIBQuery.FieldByName('FIRMMAINNAME').AsString;
+      GBIBQuery.Close;
+      FilialID:= 0;
+    end;
+    Strings.Add(Mess);
+    To_:= fnGetManagerMail(FilialID, fnGetSysAdresVlad(3)); // 3 - не отправлять смс  по ночам и выходным
+    s:= n_SysMailSend(To_, 'Сообщение от пользователя СВК', Strings, nil, From, '', true);
+    if s<>'' then begin
+      fnWriteToLog(ThreadData, lgmsCryticalSysError, 'prSendMessage2Manager', 'Ошибка отправки письма от пользователя СВК: '
+                   +fnIfStr(Pos('Ошибка записи письма в файл', s)<1, ' !!!  Сообщение записано и будет отправлено позже.', ''), s, '');
+      raise EBOBError.Create('Ошибка отправки письма от пользователя СВК: '#13#10+s);
+    end;
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess);
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      if Assigned(GBIBQuery) then s:= GBIBQuery.SQL.Text else s:= '';
+      Stream.WriteStr('в процедуре '+nmProc+': <br>'+E.Message+'<br>'+s);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, s);
+    end;
+  end;
+  prFreeIBSQL(GBIBQuery);
+  cntsGRB.SetFreeCnt(GBIBDatabase);
+  prFree(Strings);
+  Stream.Position:= 0;
+end; //prSendMessage2Manager
+
+
+procedure prGetActions(Stream: TBoBMemoryStream; ThreadData: TThreadData); // Выдать инфу по акциям и пр
+const nmProc = 'prGetActions'; // имя процедуры/функции
+var
+  UserId, FirmID, i, arlen, Count, Count1, Pos, ContractID: integer;
+  Wares: tai;
+  InfoBoxItem: TInfoBoxItem;
+  ErrorPos: string;
+  MaxCount: integer;
+  Contract: TContract;
+begin
+  Stream.Position:= 0;
+  ErrorPos:='0';
+  MaxCount:= 10;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    ContractID:=Stream.ReadInt;
+    prSetThLogParams(ThreadData, 0, UserID, FirmID, ''); // логирование
+    SetLength(Wares, 0);
+
+    if Cache.Contracts.ItemExists(ContractID) then begin
+      Contract:= Cache.Contracts.Items[ContractID];
+    end else begin
+      Contract:=nil;
+    end;
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess);
+    Stream.WriteInt(0); // заглушка под кол-во
+
+    Count:= 0;
+    Count1:= 0;
+    Pos:= 0;
+    arlen:= Cache.InfoNews.ItemsList.Count-1;
+  ErrorPos:='5';
+    // сначала формируем обязательный блок
+    while (Pos<=arlen) and (TInfoBoxItem(Cache.InfoNews.ItemsList[Pos]).Priority>0) do begin
+      InfoBoxItem:= Cache.InfoNews.ItemsList[Pos];
+      if ((Contract=nil) or (Contract.SysID=fnIfInt(InfoBoxItem.VisAuto, constIsAuto, constIsMoto))) then begin
+        Stream.WriteBool(InfoBoxItem.InWindow);
+        Stream.WriteStr(InfoBoxItem.Title);
+        Stream.WriteInt(InfoBoxItem.ID);
+        Stream.WriteStr(InfoBoxItem.LinkToSite);
+        Stream.WriteStr(InfoBoxItem.LinkToPict);
+        Inc(Count);
+      end;
+      Inc(Pos);
+    end;
+
+    // при необходимости - дополнительный
+    if (Count<MaxCount) and (Pos<=arlen) then begin
+      Setlength(Wares, arlen-Pos+1);
+      while (Count<MaxCount) and (Pos<=arlen) do begin
+        InfoBoxItem:= Cache.InfoNews.ItemsList[Pos];
+        if ((Contract=nil) or (Contract.SysID=fnIfInt(InfoBoxItem.VisAuto, constIsAuto, constIsMoto))) and (InfoBoxItem.Priority=0) then begin
+          Wares[Count1]:= Pos;
+          Inc(Count1);
+        end;
+        Inc(Pos);
+      end;
+      Setlength(Wares, Count1);
+      Wares:= fnGetRandomArray(Wares, MaxCount-Count); // получить массив длиной не более 10-Count рандомно выбранных из заданного массива элементов
+      arlen:= Length(Wares)-1;
+      for i:=0  to arlen do begin
+        InfoBoxItem:= Cache.InfoNews.ItemsList[Wares[i]];
+        Stream.WriteBool(InfoBoxItem.InWindow);
+        Stream.WriteStr(InfoBoxItem.Title);
+        Stream.WriteInt(InfoBoxItem.ID);
+        Stream.WriteStr(InfoBoxItem.LinkToSite);
+        Stream.WriteStr(InfoBoxItem.LinkToPict);
+      end;
+      Count:= Count+arlen+1;
+    end;
+
+  ErrorPos:='20';
+
+    Stream.Position:= 4;
+    Stream.WriteInt(Count); // кол-во
+  except
+    on E: Exception do begin
+//      Stream.Clear;
+//      Stream.WriteInt(aeCommonError);
+//      Stream.WriteStr('в процедуре '+nmProc+': <br>'+E.Message+'<br>');
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message+#13#10' ErrorPos='+ErrorPos, '');
+    end;
+  end;
+  Stream.Position:= 0;
+  SetLength(Wares, 0);
+end; //prGetActions
+
+procedure prClickOnNewsCounting(Stream: TBoBMemoryStream; ThreadData: TThreadData); // Фиксация клика по новостям/акциям
+const nmProc = 'prClickOnNewsCounting'; // имя процедуры/функции
+var
+  UserId, FirmID, ActionID : integer;
+  OrdIBDatabase: TIBDatabase;
+  OrdIBQuery: TIBSQL;
+begin
+  Stream.Position:= 0;
+  OrdIBQuery:= nil;
+  OrdIBDatabase:= nil;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    ActionID:= Stream.ReadInt;
+
+    prSetThLogParams(ThreadData, 0, UserID, FirmID,
+      'ActionID='+IntToStr(ActionID)+#13#10); // логирование
+{
+    if not Cache.ClientExist(UserID) or not Cache.FirmExist(FirmId) then
+      raise Exception.Create('Ошибка запроса данных.');
+}
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess);
+    OrdIBDatabase:= cntsOrd.GetFreeCnt;
+    OrdIBQuery:= fnCreateNewIBSQL(OrdIBDatabase,'OrdIBQuery_'+nmProc,ThreadData.ID, tpWrite, true);
+    OrdIBQuery.SQL.Text:= 'Update INFOBOXVIEWS set IBVCLICKCOUNT=IBVCLICKCOUNT+1 where IBVCODE='+IntToStr(ActionID);
+    OrdIBQuery.ExecQuery;
+    OrdIBQuery.Transaction.Commit;
+  except
+    on E: Exception do begin
+//      Stream.Clear;
+//      Stream.WriteInt(aeCommonError);
+//      Stream.WriteStr('в процедуре '+nmProc+': <br>'+E.Message+'<br>');
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:= 0;
+  prFreeIBSQL(OrdIBQuery);
+  cntsORD.SetFreeCnt(OrdIBDatabase);
+end; //prClickOnNewsCounting
+
+procedure prSaveOption(Stream: TBoBMemoryStream; ThreadData: TThreadData); // Фиксация клика по новостям/акциям
+const nmProc = 'prSaveOption'; // имя процедуры/функции
+var
+  UserId, FirmID, ActionID, Value : integer;
+  OrdIBDatabase: TIBDatabase;
+  OrdIBS: TIBSQL;
+  s: string;
+begin
+  Stream.Position:= 0;
+  OrdIBS:= nil;
+  OrdIBDatabase:= nil;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    ActionID:= Stream.ReadInt;
+    Value:= Stream.ReadInt;
+
+    prSetThLogParams(ThreadData, 0, UserID, FirmID,
+      'ActionID='+IntToStr(ActionID)+#13#10+'Value='+IntToStr(Value)); // логирование
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess);
+    OrdIBDatabase:= cntsOrd.GetFreeCnt;
+    OrdIBS:= fnCreateNewIBSQL(OrdIBDatabase,'OrdIBQuery_'+nmProc,ThreadData.ID, tpWrite, true);
+
+    OrdIBS.SQL.Text:= 'UPDATE WEBORDERCLIENTS SET ';
+    case ActionID of
+      optPayType: begin
+        OrdIBS.SQL.Add('WOCLDEFAULTACCOUNTINGTYPE='+fnIfStr(Value=1, '1', '0'));
+      end;
+      optDeliveryType: begin
+        OrdIBS.SQL.Add('WOCLDEFAULTDELIVERYTYPE='+fnIfStr(Value=1, '1', '0'));
+      end;
+      optNoRemindAboutComment: begin
+        OrdIBS.SQL.Add('WOCLNOTREMINDCOMMENT='+fnIfStr(Value=1, '"T"', '"F"'));
+      end;
+      optSearchCurrency: begin
+        OrdIBS.SQL.Add('WOCLSEARCHCURRENCY='+fnIfStr(Value=1, '1', '10'));
+      end;
+      optResultLimitForAnalog: begin
+        if (Value<1) then Value:=1;
+        if (Value>30) then Value:=30;
+        OrdIBS.SQL.Add('WOCLMAXROWFORSHOWANALOGS='+IntToStr(Value));
+      end;
+      optThisContractDocsOnly: begin
+        OrdIBS.SQL.Add('WOCLDOCSBYCONTR='+fnIfStr(Value=1, '"T"', '"F"'));
+      end;
+      else begin
+        raise EBOBError.Create('Неизвестный номер настройки  - '+IntToStr(ActionID));
+      end;
+    end;
+    OrdIBS.SQL.Add(' where WOCLCODE='+IntToStr(UserID));
+
+    s:= RepeatExecuteIBSQL(OrdIBS);
+    if s<>'' then raise Exception.Create(s);
+
+    with Cache.arClientInfo[UserID] do
+    case ActionID of
+      optPayType: begin
+        DEFACCOUNTINGTYPE:= fnIfInt(Value=1, 1, 0);
+      end;
+      optDeliveryType: begin
+        DEFDELIVERYTYPE:= fnIfInt(Value=1, 1, 0);
+      end;
+      optNoRemindAboutComment: begin
+        NOTREMINDCOMMENT:=(Value=1);
+      end;
+      optSearchCurrency: begin
+        SearchCurrencyId:= fnIfint(Value=1, 1, 10);
+      end;
+      optResultLimitForAnalog: begin
+        MaxRowShowAnalogs:= Value;
+      end;
+      optThisContractDocsOnly: begin
+        DocsByCurrContr:=(Value=1);
+      end;
+    end;
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr('в процедуре '+nmProc+': <br>'+E.Message+'<br>');
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:= 0;
+  prFreeIBSQL(OrdIBS);
+  cntsORD.SetFreeCnt(OrdIBDatabase);
+end; //prSaveOption
+
+//******************************************************************************
+procedure prGetQtyByAnalogsAndStoragesOrd(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prGetQtyByAnalogsAndStoragesOrd'; // имя процедуры/функции
+var OrdIBD: TIBDatabase;
+    OrdIBQuery: TIBSQL;
+    UserID, FirmID, i, ia, StorageCount, WareCount, WareID, sPos: integer;
+    s, WareRequestId, WareCode, OrderCode, Currency, ErrPos: string;
+    Storages: TaSD;
+    WareQty, WareQty2, WareTotal: double;
+    pRetail, pSelling: double;
+    OrderExists, WareOrAnalogInOrder, NewWareRequestId: boolean;
+    Ware: TWareInfo;
+    OList: TObjectList;
+    ar: Tai;
+    firma: TFirmInfo;
+    arOrderWareQties: array of Tas;
+    owID, owIndex: integer;
+    contID: integer;
+    Contract: TContract;
+begin
+  Stream.Position:= 0;
+  FirmID:= 0;
+  UserID:= 0;
+  OrdIBD:= nil;
+  OrdIBQuery:= nil;
+  SetLength(ar, 0);
+  SetLength(arOrderWareQties, 0);
+  OrderExists:= false;
+  WareTotal:= 0;
+  WareOrAnalogInOrder:= false;
+  NewWareRequestId:= true;
+  WareQty:= -1;
+  contID:= 0;
+  try
+ErrPos:= '1';
+    try
+      UserID:= Stream.ReadInt;
+      FirmID:= Stream.ReadInt;
+      ContID:= Stream.ReadInt;
+      OrderCode:= Stream.ReadStr;
+      WareCode:= Stream.ReadStr;
+      WareQty:= Stream.ReadDouble;
+      if (WareQty<constDeltaZero) then WareQty:= 1;
+      s:= Stream.ReadStr;
+      WareRequestId:= StringReplace(s, ' ', '', [rfReplaceAll]);
+ErrPos:= '2';
+    finally
+      prSetThLogParams(ThreadData, 0, UserID, FirmID, 'OrderCode='+OrderCode+
+        ', WareCode='+WareCode+', WareQty='+FloatToStr(WareQty)); // логирование
+    end;
+    WareID:= StrToIntDef(WareCode, 0);
+    if (WareID<1) or not Cache.WareExist(WareID) then
+      raise EBOBError.Create(MessText(mtkNotFoundWare, WareCode));
+
+    if not Cache.FirmExist(FirmID) then
+      raise EBOBError.Create(MessText(mtkNotFirmExists));
+    firma:= Cache.arFirmInfo[FirmID];
+
+    Cache.arClientInfo[UserID].CheckQtyCount; // проверяем счетчик запросов наличия
+
+    OrdIBD:= cntsORD.GetFreeCnt;
+    if not Assigned(OrdIBD) then raise EBOBError.Create(MessText(mtkErrConnectToDB));
+    OrdIBQuery:= fnCreateNewIBSQL(OrdIBD, 'OrdIBQuery_'+nmProc, ThreadData.ID, tpRead, True);
+    OrderExists:= OrderCode<>'';
+    if OrderExists then begin
+      OrdIBQuery.SQL.Text:= 'Select ORDRCURRENCY, ORDRLNCODE, ORDRCONTRACT FROM ORDERSREESTR'+
+        ' left join ORDERSLINES on ORDRLNORDER=ORDRCODE and ORDRLNWARE='+WareCode+
+        ' WHERE ORDRCODE='+OrderCode+' and ORDRFIRM='+IntToStr(FirmId)+' and ORDRSTATUS='+IntToStr(orstForming);
+      OrdIBQuery.ExecQuery;
+      OrderExists:= not (OrdIBQuery.Bof and OrdIBQuery.Eof);
+    end;
+
+    if OrderExists then begin // если товар уже есть в заказе - потом будем игнорировать ввод
+      WareOrAnalogInOrder:= not OrdIBQuery.FieldByName('ORDRLNCODE').IsNull;
+      Currency:= OrdIBQuery.FieldByName('ORDRCURRENCY').AsString;
+      contID:= OrdIBQuery.FieldByName('ORDRCONTRACT').AsInteger;
+    end;
+    OrdIBQuery.Close;
+
+    Contract:= firma.GetContract(contID);
+    if (not OrderExists) then                                            // если заказа нет
+      Currency:= IntToStr(Cache.arClientInfo[UserID].SearchCurrencyID);  // берем валюту из настроек пользователя
+
+ErrPos:= '3';
+    ar:= fnGetAllAnalogs(WareID, -1, Contract.SysID);   //
+ErrPos:= '6';
+// +++ формируем массив кодов видимых складов
+    Storages:= fnGetStoragesArray(UserID, FirmID, False, contID);
+    StorageCount:= Length(Storages);
+    if OrderExists then begin
+      OrdIBQuery.SQL.Text:= 'Select OWBSSTORAGE, OWBSQTY, ORDRLNWARE'+
+        ' FROM ORDERSLINES, ORDERSWAREBYSTORAGES'+
+        ' WHERE OWBSORDERLINE=ORDRLNCODE AND ORDRLNORDER='+OrderCode+
+        ' order by ORDRLNWARE, OWBSSTORAGE';
+ErrPos:= '11';
+      OrdIBQuery.ExecQuery; // запоминаем строковые количества из заказа в массив
+      SetLength(arOrderWareQties, Length(ar)+1); // сначала вход.товар(индекс 0), потом аналоги(индексы от 1)
+      for i:= 0 to High(arOrderWareQties) do begin
+        SetLength(arOrderWareQties[i], StorageCount);
+        for ia:= 0 to StorageCount-1 do arOrderWareQties[i][ia]:= '0';
+      end;
+      while not OrdIBQuery.Eof do begin
+        owID:= OrdIBQuery.FieldByName('ORDRLNWARE').AsInteger; // ищем индекс товара
+        if (owID=WareID) then owIndex:= 0   // сначала вход.товар
+        else begin
+          owIndex:= fnInIntArray(owID, ar); // потом аналоги
+          if owIndex>-1 then Inc(owIndex);
+        end;
+        while not OrdIBQuery.Eof and (owID=OrdIBQuery.FieldByName('ORDRLNWARE').AsInteger) do begin
+          if owIndex>-1 then begin
+            s:= OrdIBQuery.FieldByName('OWBSSTORAGE').AsString;
+            ia:= -1;                      // ищем индекс склада
+            for i:= 0 to StorageCount-1 do if Storages[i].Code=s then begin
+              ia:= i;
+              break;
+            end;
+            if ia>-1 then arOrderWareQties[owIndex][ia]:=
+              trim(FormatFloat('###0.#', OrdIBQuery.FieldByName('OWBSQTY').AsFloat));
+          end;
+          OrdIBQuery.Next;
+        end;
+      end;
+      OrdIBQuery.Close;
+    end;
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess);
+    sPos:= Stream.Position;
+    Stream.WriteInt(0); // место под кол-во возвращаемых товаров. Логичней было бы его передать позже, но сюда удобней потом адресоваться для вписывания факта
+    Stream.WriteStr(Cache.GetCurrName(StrToInt(Currency), True)); //
+    Stream.WriteStr(WareRequestId); //
+    Stream.WriteStr(FormatFloat('###0.#', WareQty)); //
+    Stream.WriteStr(WareCode); //
+    prSendStorages(Storages, Stream);
+
+    Ware:= Cache.GetWare(WareID);
+    Stream.WriteInt(WareID);       // код товара
+    Stream.WriteStr(Ware.PgrName); //
+    Stream.WriteStr(Ware.Name); //
+    Stream.WriteBool(Ware.IsSale); //
+    Ware.CalcFirmPrices(pRetail, pSelling, FirmID, StrToInt(Currency), ContID);
+
+    Stream.WriteStr(trim(FormatFloat('# ##0.00', pRetail)));  // розница
+    Stream.WriteStr(trim(FormatFloat('# ##0.00', pSelling))); // со скидкой
+    Stream.WriteStr(Ware.MeasName);     //
+    WareQty2:= WareQty;
+ErrPos:= '13';
+    OList:= Cache.GetWareRestsByStores(Ware.ID);
+    try
+      for i:= 0 to StorageCount-1 do begin
+        Stream.WriteStr(fnRestValuesForWeb(WareQty, fnGetQtybyIDDef(OList, StrToInt(Storages[i].Code), 0)));
+        if (Storages[i].IsReserve) then begin // если склад доступен для резервирования, то передаем текущее кол-во заказа
+  ErrPos:= '14- ware='+IntToStr(Ware.ID)+' stor='+Storages[i].Code;
+          if OrderExists and WareOrAnalogInOrder then begin
+            Stream.WriteStr(arOrderWareQties[0][i]);
+          end else begin
+            Stream.WriteStr(FormatFloat('###0.#', WareQty2)); // первый раз в строку ввода должно попасть первоначальное значение
+            WareQty2:= 0;
+          end;
+        end;
+      end;
+      // считаем  здесь, чтобы потом не вызывать GetWareRestsByStores еще раз
+      for i:= 0 to High(Contract.ContStorages) do if (Contract.ContStorages[i].IsVisible)  then
+        WareTotal:= WareTotal+fnGetQtybyIDDef(OList, Contract.ContStorages[i].DprtID, 0);
+    finally
+      prFree(OList);
+    end;
+
+    WareCount:= 1;
+    for ia:= Low(ar) to High(ar) do begin  // переход с fnGetAnalogsAll на fnGetAllAnalogs
+      Ware:= Cache.GetWare(ar[ia]);
+      Stream.WriteInt(Ware.ID);     // код товара
+      Stream.WriteStr(Ware.PgrName);       //
+      Stream.WriteStr(Ware.Name);          //
+      Stream.WriteBool(Ware.IsSale); //
+      Ware.CalcFirmPrices(pRetail, pSelling, FirmID, StrToInt(Currency), contID);
+      Stream.WriteStr(trim(FormatFloat('# ##0.00', pRetail)));  // Розница
+      Stream.WriteStr(trim(FormatFloat('# ##0.00', pSelling))); // со скидкой
+      Stream.WriteStr(Ware.MeasName);     //
+      OList:= Cache.GetWareRestsByStores(Ware.ID);
+      try
+        for i:= 0 to StorageCount-1 do begin
+  ErrPos:= '16- an='+IntToStr(ar[ia])+' stor='+Storages[i].Code;
+          Stream.WriteStr(fnRestValuesForWeb(WareQty, fnGetQtybyIDDef(OList, StrToInt(Storages[i].Code), 0)));
+          if (Storages[i].IsReserve) then begin // если склад доступен для резервирования, то передаем текущее кол-во заказа
+            if OrderExists then Stream.WriteStr(arOrderWareQties[ia+1][i])
+            else Stream.WriteStr('0');
+          end;
+        end;
+        Inc(WareCount);
+      finally
+        prFree(OList);
+      end;
+    end;
+    Stream.Position:= sPos;
+    Stream.WriteInt(WareCount); // записываем кол-во товаров (возвращаемых записей)
+
+// Записываем факт интереса пользователя для дальнейшего анализа
+
+ErrPos:= '18-1';
+    fnSetTransParams(OrdIBQuery.Transaction, tpWrite, True);
+    OrdIBQuery.SQL.Text:= 'INSERT INTO WareRequests (WRWAREID, WRUSERID, WRFROM, WRQTY, WRREST, WRTIME)'+
+      'VALUES ('+WareCode+', '+IntToStr(UserID)+', '+fnIfStr(OrderExists, '1', '0')+', :clientqty, :totalqty, "NOW")';
+    OrdIBQuery.ParamByName('clientqty').AsFloat:= WareQty;
+    OrdIBQuery.ParamByName('totalqty').AsFloat:= WareTotal;
+ErrPos:= '18-2';
+    s:= RepeatExecuteIBSQL(OrdIBQuery);
+    if (s<>'') then fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', s, 'ErrPos='+ErrPos);
+
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(fnReplaceQuotedForWeb(E.Message));
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(MessText(mtkErrProcess));
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, 'ErrPos='+ErrPos);
+    end;
+  end;
+  Stream.Position:= 0;
+  SetLength(ar, 0);
+  prFreeIBSQL(OrdIBQuery);
+  if OrderExists then begin
+    for i:= 0 to High(arOrderWareQties) do SetLength(arOrderWareQties[i], 0);
+    SetLength(arOrderWareQties, 0);
+  end;
+  cntsORD.SetFreeCnt(OrdIBD);
+  SetLength(Storages, 0);
+  prFree(OList);
+end;
+
+procedure prSendVINOrder(Stream: TBoBMemoryStream; ThreadData: TThreadData); // Фиксация клика по новостям/акциям
+const nmProc = 'prSendVINOrder'; // имя процедуры/функции
+var
+  UserId, FirmID : integer;
+  s, mail: string;
+  Body: TStringList;
+begin
+  Stream.Position:= 0;
+  Body:=TStringList.Create;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    prSetThLogParams(ThreadData, 0, UserID, FirmID); // логирование
+    if CheckNotValidUser(UserID, FirmID, s) then raise EBOBError.Create(s);
+
+    Body.Add('Представитель контрагента '+Cache.arFirmInfo[FirmID].Name+' под логином '+Cache.arClientInfo[UserID].Login+' '+FormatDateTime('dd.mm.yyyy в hh:nn', Now)+' отправил запрос по вин-коду'#13#10);
+    s:=Stream.ReadStr;
+    Body.Add(s);
+    Body.Add('Необходимые запчасти:'#13#10);
+    s:=Stream.ReadStr;
+    Body.Add(s);
+    Body.Add('Контактные данные:'#13#10);
+    s:=Stream.ReadStr;
+    Body.Add(s);
+    mail:=Cache.GetConstEmails(pcVINmailEmpl_list, s);
+    if mail='' then begin
+      EBOBError.Create('Извините, но Ваш запрос не может быть отправлен - в системе отсутствует адрес доставки запроса');
+    end;
+    n_SysMailSend(mail, 'Запрос по VIN-коду', Body, nil, '', '', True);
+    if s<>'' then begin
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, 'Не найдены адреса сотрудников в списке адресов для приема заказов по VIN-коду:', s, '');
+    end;
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess);
+
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr('в процедуре '+nmProc+': <br>'+E.Message+'<br>');
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:= 0;
+  prFree(Body);
+end; // prSendVINOrder
+
+procedure prDownloadPrice(Stream: TBoBMemoryStream; ThreadData: TThreadData); // выдача прайса
+const nmProc = 'prDownloadPrice'; // имя процедуры/функции
+var
+  UserId, FirmID, i,j, Version: integer;
+  s: String;
+  rbs, FileName: RawByteString;
+  Body: TStringList;
+  Ware: TWareInfo;
+  Firm: TFirmInfo;
+  RestMain, RestAll, RestThird: double;
+  link: TQtyLink;
+  Stream1: TBoBMemoryStream;
+  contID: integer;
+  Contract: TContract;
+  ForbiddenBrands: Tai;
+  sParam: String;
+
+begin
+  Stream.Position:= 0;
+  Stream1:=nil;
+  contID:= 0;
+  SetLength(ForbiddenBrands, 0);
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    ContID:= Stream.ReadInt; // для контрактов
+    Version:= Stream.ReadInt;
+    sParam:= 'version='+IntToStr(Version);
+    try
+      if CheckNotValidUser(UserID, FirmID, s) then raise EBOBError.Create(s);
+      Firm:= Cache.arFirmInfo[FirmId];
+      if not Firm.EnablePriceLoad then raise EBOBError.Create('Функция скачивания прайса недоступна');
+      Body:= TStringList.Create;
+
+      Contract:= firm.GetContract(contID);
+
+  //    ForbiddenBrands:=fnArrOfCodesFromString(Cache.GetConstItem(pcDownLoadExcludeBrands).StrValue);
+      ForbiddenBrands:= Cache.GetDownLoadExcludeBrands;
+
+      for i := 0 to High(Cache.arWareInfo) do begin
+        if not Cache.WareExist(i) then continue;
+        Ware:=Cache.GetWare(i);
+        if not Ware.isWare then begin continue; end;
+        if Ware.IsArchive then begin continue; end;
+        if Ware.IsINFOgr then begin continue; end;
+        if not fnNotZero(Ware.RetailPrice(FirmID, cDefCurrency, contID)) then begin continue; end;
+        if not Ware.CheckWareTypeSys(Contract.SysID) then begin continue; end;
+        if (Ware.PgrID=0) or (Ware.PgrID=Cache.pgrDeliv) then begin continue; end;// пропускаем доставки
+        if (fnInIntArray(Ware.WareBrandID, ForbiddenBrands)>-1) then begin continue; end;// пропускаем запрещенные бренды
+
+        RestMain:=0;
+        RestAll:=0;
+        RestThird:=0;
+        for j := 0 to Length(Contract.ContStorages)-1 do begin
+          link:= Ware.RestLinks[Contract.ContStorages[j].DprtID];
+          if Assigned(link) then begin
+            if (link.Qty>0) then begin
+              if Contract.ContStorages[j].isDefault then begin
+                RestMain:=link.Qty
+              end else
+              if Contract.ContStorages[j].IsVisible then begin
+                RestAll:=RestAll+link.Qty;
+              end else
+              if Contract.ContStorages[j].IsAddVis then begin
+                RestThird:=RestThird+link.Qty;
+              end;
+            end;
+          end;
+        end;
+
+        Body.Add(
+                 fnIfStr(Version=1, '"'+IntToStr(Ware.ID)+'";', '')+
+                 '"'+Ware.WareBrandName+'";'+
+                 fnIfStr(Version=1, '"'+Ware.Name+'";', '')+
+                 '"'+Ware.WareSupName+'";'+
+                 '"'+FormatFloat('# ##0.00', Ware.SellingPrice(FirmID, cDefCurrency, contID))+'";'+
+                 '"'+fnRestValuesForReport(RestMain)+'";'+'"'+fnRestValuesForReport(RestAll)+'";'+
+                 fnIfStr(Version=1, '"'+StringReplace(Ware.Comment, '"', '""', [rfReplaceAll])+'";', '')+
+                 fnIfStr((Version=1) and Contract.HasAddVis, '"'+fnRestValuesForReport(RestThird)+'";', '')+
+                 '');
+
+      end;
+      Body.Sort;
+      if (Version=1) then begin
+        Body.Insert(0, '"Внутренний код";"Бренд";"Полное наименование";"Артикул";"Цена";"Остаток на складе по умолчанию";"Суммарный остаток на доступных складах";"Комментарий";'+fnIfStr(Contract.HasAddVis, 'Доставка >1 дня', ''));
+      end else begin
+        Body.Insert(0, '"Бренд";"Наименование";"Цена";"Остаток на складе по умолчанию";"Суммарный остаток на доступных складах";');
+      end;
+
+      Stream.Clear;
+      Stream.WriteInt(aeSuccess);
+      FileName:='pricevlad_'+FormatDateTime('yyyymmdd_hhnnss', Now())+'_Contr#'+Contract.Name;
+      rbs:=Body.Text;
+      i:=Length(rbs);
+
+      Stream1:=TBoBMemoryStream.Create;
+      Stream1.Write(Pointer(rbs)^, i);
+      rbs:=RawByteString(GetAppExePath);
+      Stream1.Position:=0;
+      ZipStream(Stream1, rbs, FileName+'.csv');
+      Stream.WriteStr('application/zip');
+      Stream.WriteStr(FileName+'.zip');
+      Stream.WriteInt(Stream1.Size);
+      Stream.CopyFrom(Stream1, Stream1.Size);
+      sParam:= sParam+#13#10'Succes=true'; // логирование - признак успешной загрузки
+    finally
+      prSetThLogParams(ThreadData, 0, UserID, FirmID, sParam);
+    end;
+
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr('в процедуре '+nmProc+': <br>'+E.Message+'<br>');
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:= 0;
+  prFree(Body);
+  prFree(Stream1);
+  SetLength(ForbiddenBrands, 0);
+end; // prDownloadPrice
+
+
+procedure prShowNotificationOrd(Stream: TBoBMemoryStream; ThreadData: TThreadData); // Фиксация клика по новостям/акциям
+const nmProc = 'prShowNotification'; // имя процедуры/функции
+var
+  OrdIBD: TIBDatabase;
+  OrdIBQuery: TIBSQL;
+  UserId, FirmID, NotifyID : integer;
+  s: string;
+begin
+  Stream.Position:= 0;
+  OrdIBD:= nil;
+//  OrdIBQuery:= nil;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    NotifyID:= Stream.ReadInt;
+    prSetThLogParams(ThreadData, 0, UserID, FirmID, 'NotifyID='+IntToStr(NotifyID)); // логирование
+    if CheckNotValidUser(UserID, FirmID, s) then raise EBOBError.Create(s);
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess);
+
+    if (FirmID=isWe) then begin
+      OrdIBD:= cntsORD.GetFreeCnt;
+      if not Assigned(OrdIBD) then raise EBOBError.Create(MessText(mtkErrConnectToDB));
+      OrdIBQuery:= fnCreateNewIBSQL(OrdIBD, 'OrdIBQuery_'+nmProc, ThreadData.ID, tpRead, True);
+      OrdIBQuery.SQL.Text:= 'Select * FROM NOTIFICATIONS WHERE NOTECODE='+IntToStr(NotifyID);
+      OrdIBQuery.ExecQuery;
+      if OrdIBQuery.EOF then EBOBError.Create('Не найдено уведомление с кодом '+IntToStr(NotifyID));
+      s:=OrdIBQuery.FieldByName('NOTETEXT').AsString;
+      OrdIBQuery.Close;
+    end else begin
+      s:=Cache.SetClientNotifiedKind(UserId, NotifyID, 0);
+      if s<>'' then raise EBOBError.Create(s);
+      s:=Cache.Notifications[NotifyID].Name;
+    end;
+    Stream.WriteStr(s);
+
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr('в процедуре '+nmProc+': <br>'+E.Message+'<br>');
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:= 0;
+  cntsORD.SetFreeCnt(OrdIBD);
+end; // prShowNotification
+
+procedure prConfirmNotification(Stream: TBoBMemoryStream; ThreadData: TThreadData); // Фиксация клика по новостям/акциям
+const nmProc = 'prConfirmNotification'; // имя процедуры/функции
+var
+  UserId, FirmID, NotifyID : integer;
+  s: string;
+begin
+  Stream.Position:= 0;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    NotifyID:= Stream.ReadInt;
+    prSetThLogParams(ThreadData, 0, UserID, FirmID, 'NotifyID='+IntToStr(NotifyID)); // логирование
+    if CheckNotValidUser(UserID, FirmID, s) then raise EBOBError.Create(s);
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess);
+    Cache.SetClientNotifiedKind(UserId, NotifyID, 1);
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr('в процедуре '+nmProc+': <br>'+E.Message+'<br>');
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:= 0;
+end; // prConfirmNotification
+
+
+procedure prContractList(Stream: TBoBMemoryStream; ThreadData: TThreadData); // Фиксация клика по новостям/акциям
+const nmProc = 'prContractList'; // имя процедуры/функции
+var
+  UserId, FirmID : integer;
+  s: string;
+  i, Count, j: integer;
+  Contract: TContract;
+  Client: TClientInfo;
+begin
+  Stream.Position:= 0;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    prSetThLogParams(ThreadData, 0, UserID, FirmID); // логирование
+    if CheckNotValidUser(UserID, FirmID, s) then raise EBOBError.Create(s);
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess);
+    Client:=Cache.arClientInfo[UserID];
+    Count:= Client.CliContracts.Count;
+    Stream.WriteInt(Count);
+    for i:=0 to Count-1 do begin
+      j:=Client.CliContracts[i];
+      Contract:= Client.GetCliContract(j);
+      Stream.WriteInt(Contract.ID);
+      Stream.WriteStr(Contract.Name);
+      Stream.WriteInt(Contract.PayType);
+      Stream.WriteStr(Contract.SysName);
+      Stream.WriteInt(Contract.DutyCurrency);
+      Stream.WriteDouble(Contract.CredLimit);
+      Stream.WriteStr(Cache.GetCurrName(Contract.CredCurrency, True));
+      Stream.WriteInt(Contract.CredDelay);
+      Stream.WriteDouble(Contract.DebtSum);
+      Stream.WriteBool(Contract.SaleBlocked);
+      Stream.WriteStr(Contract.WarnMessage);
+    end;
+
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr('в процедуре '+nmProc+': <br>'+E.Message+'<br>');
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:= 0;
+end; // prContractList
+
+
+procedure prRemindPass(Stream: TBoBMemoryStream; ThreadData: TThreadData); // Фиксация клика по новостям/акциям
+const nmProc = 'prRemindPass'; // имя процедуры/функции
+var
+  IBOS,IBLS: TIBSQL;
+  IBOD, IBLD: TIBDatabase;
+  UserId, FirmID : integer;
+  s, login, IP: string;
+  Client: TClientInfo;
+  Strings: TStringList;
+begin
+  Stream.Position:= 0;
+  IBOS:= nil;
+  IBOD:= nil;
+  IBLS:= nil;
+  IBLD:= nil;
+  Strings:=nil;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    login:= Stream.ReadStr;
+    IP:= Stream.ReadStr;
+    prSetThLogParams(ThreadData, 0, UserID, FirmID, 'login='+login+' IP='+IP); // логирование
+//    if CheckNotValidUser(UserID, FirmID, s) then raise EBOBError.Create(s);
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess);
+
+
+    UserId:=Cache.arClientInfo.WorkLogins.IndexOf(login);
+    if UserId=-1 then begin  // если не нашли в кэше, то ищем в базе
+      IBOD:= cntsORD.GetFreeCnt;
+      IBOS:= fnCreateNewIBSQL(IBOD, 'IBOS_'+nmProc, ThreadData.ID, tpRead, True);
+
+      IBOS.SQL.Text:= 'Select WOCLCODE from WEBORDERCLIENTS where WOCLLOGIN=:LOGIN';
+      IBOS.ParamByName('LOGIN').AsString:= login;
+      IBOS.ExecQuery;
+      if not (IBOS.Bof and IBOS.Eof) then begin
+        UserId:=IBOS.FieldByName('WOCLCODE').AsInteger;
+      end;
+      IBOS.Close;
+    end else begin
+      UserId:=integer(Cache.arClientInfo.WorkLogins.Objects[UserId]);
+    end;
+
+    if UserId=-1 then begin
+      raise EBOBError.Create('Ошибка восстановления пароля - логин "'+login+'" не найден.');
+    end;
+    Cache.TestClients(UserId, true); // загрузка данных клиента в кэш
+    Client:=Cache.arClientInfo[UserId];
+
+    if Client.Blocked then begin
+      raise EBOBError.Create('Ошибка восстановления пароля - логин "'+login+'" заблокирован.');
+    end;
+
+    if Client.Mail='' then begin
+      raise EBOBError.Create('Ошибка восстановления пароля - у учетной записи с логином "'+login+'" отсутствует e-mail. Сообщите свой логин и e-mail ведущему Вашу организацию менеджеру Компании "Владислав".');
+    end;
+
+    IBLD:= cntsLOG.GetFreeCnt;
+    IBLS:= fnCreateNewIBSQL(IBLD, 'IBLS_'+nmProc, ThreadData.ID, tpWrite, True);
+    IBLS.SQL.Text:= 'select rErrText from CheckFirmIPRePass('+
+      IntToStr(Client.FirmID)+', :IP, '+Cache.GetConstItem(pcClientRePassTryLimit).StrValue+', '+Cache.GetConstItem(pcClientRePassMinutes).StrValue+')';
+    IBLS.ParamByName('IP').AsString:= IP;
+    IBLS.ExecQuery;
+    if (IBLS.Bof and IBLS.Eof) then raise Exception.Create(MessText(mtkNotValidParam));
+    s:=IBLS.FieldByName('rErrText').AsString;
+    IBLS.Transaction.Commit;
+    IBLS.Close;
+
+    if s<>'' then begin
+      raise EBOBError.Create(s);
+    end;
+
+    Strings:=TStringList.Create;
+    Strings.Add('Здравствуйте!');
+    Strings.Add('');
+    Strings.Add('Ваш логин: '+Client.Login);
+    Strings.Add('Ваш пароль: '+Client.Password);
+    Strings.Add('Учетная запись принадлежит организации '+Client.FirmName);
+//    Strings.Add('Логин: '+Client.Login);
+    Strings.Add('');
+    Strings.Add('Если Вы не запрашивали восстановление пароля, перешлите это письмо в службу поддержки support@vladislav.ua .');
+    Strings.Add('');
+    Strings.Add('С уважением,');
+    Strings.Add('Команда ВЛАДИСЛАВ');
+    s:= n_SysMailSend(Client.Mail, 'Восстановление пароля на сайте order.vladislav.ua', Strings, nil, 'no.reply@vladislav.ua', '', true);
+    if s<>'' then begin
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', s, '');
+      Stream.WriteStr('Произошла ошибка отправки письма с напоминанием пароля. Попробуйте повторить запрос через некоторое время. '
+           +'Если такая ошибка происходит регулярно, то сообщите еще раз обслуживающему Вашу организацию менеджеру Ваш e-mail - возможно ранее данные были внесены в базу неправильно.');
+    end else begin
+      Stream.WriteStr('Напоминание пароля отправлено на e-mail пользователя с логином '+login);
+    end;
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr('в процедуре '+nmProc+': <br>'+E.Message+'<br>');
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:= 0;
+  prFree(Strings);
+  prFreeIBSQL(IBOS);
+  cntsORD.SetFreeCnt(IBOD);
+  prFreeIBSQL(IBLS);
+  cntsLOG.SetFreeCnt(IBLD);
+end; // prRemindPass
+
+
+procedure prGetContracts(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prGetContracts'; // имя процедуры/функции
+var UserId, FirmID, ContID, MainStorage: integer;
+    Client: TClientInfo;
+    Firm: TFirmInfo;
+    Contract: TContract;
+    errmess: string;
+begin
+  Stream.Position:= 0;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    prSetThLogParams(ThreadData,0,UserID,FirmID,''); // логирование
+
+    if CheckNotValidUser(UserID, FirmID, errmess) then raise EBOBError.Create(errmess);
+
+    Client:=Cache.arClientInfo[UserID];
+    Firm:=Cache.arFirmInfo[FirmID];
+    ContID:= Client.LastContract;
+    Contract:= firm.GetContract(ContID);
+    MainStorage:=Contract.MainStorage;
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+    Stream.WriteStr(Cache.arDprtInfo[MainStorage].ColumnName); //
+
+
+
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:= 0;
+end; // prGetContracts
+
+
+procedure prGetBonusWares(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prGetBonusWares'; // имя процедуры/функции
+var UserId, FirmID, ContID, Pos: integer;
+    Client: TClientInfo;
+    Firm: TFirmInfo;
+    Contract: TContract;
+    errmess: string;
+    Wares:  TObjectList;
+    i, j: integer;
+    pRetail, pSelling: Double;
+
+function PriceCustomSort(List: TIntegerList; Index1, Index2: Integer): Integer;
+var R1, R2: Double;
+begin
+  try
+    R1:=TCodeAndQty(List[Index1]).Qty;
+    R2:=TCodeAndQty(List[Index2]).Qty;
+    if R1>R2 then result:= -1 else if R1<R2 then result:= 1 else result:= 0;
+  except
+    Result:= 0;
+  end;
+end;
+
+begin
+  Stream.Position:= 0;
+  Wares:=TObjectList.Create;
+  try
+    UserId:= Stream.ReadInt;
+    FirmId:= Stream.ReadInt;
+    ContID:= Stream.ReadInt;
+    prSetThLogParams(ThreadData,0,UserID,FirmID,''); // логирование
+
+    if CheckNotValidUser(UserID, FirmID, errmess) then raise EBOBError.Create(errmess);
+
+    Client:=Cache.arClientInfo[UserID];
+    Firm:=Cache.arFirmInfo[FirmID];
+    ContID:= Client.LastContract;
+    Contract:= firm.GetContract(ContID);
+
+    for i:= 1 to High(Cache.arWareInfo) do begin
+      if not Cache.WareExist(i) then Continue;
+      if Cache.arWareInfo[i].IsArchive or not Cache.arWareInfo[i].IsPrize then Continue;                                           // отсев по архивности  и непризовости
+      if (Cache.arWareInfo[i].PgrID=Cache.pgrDeliv) then Continue;                                           // пропускаем доставки
+      Cache.arWareInfo[i].CalcFirmPrices(pRetail, pSelling, FirmID, cDefCurrency, contID);
+      if not fnNotZero(pSelling) then Continue;                                           // пропускаем товары без цены
+
+      Wares.Add(TCodeAndQty.Create(Cache.arWareInfo[i].ID, pSelling*Cache.BonusVolumeCoeff));
+    end; // with arWareInfo[i]
+    Wares.Sort(@PriceCustomSort);
+
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+    Stream.WriteInt(Wares.Count);
+    Pos:=Stream.Position;
+    j:=0;
+    Stream.WriteInt(0); //
+    for I := 0 to Wares.Count-1 do begin
+      Stream.WriteInt(TCodeAndQty(Wares[i]).ID);
+      Stream.WriteDouble(TCodeAndQty(Wares[i]).Qty); //
+      Stream.WriteStr(Cache.arWareInfo[TCodeAndQty(Wares[i]).ID].Name); //
+      if (TCodeAndQty(Wares[i]).Qty<Firm.BonusQty) then j:=i;
+    end;
+    Stream.Position:=Pos;
+    Stream.WriteInt(j); //
+
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:= 0;
+end; // prGetBonusWares
+
+end.

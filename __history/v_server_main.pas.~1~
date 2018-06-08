@@ -1,0 +1,270 @@
+unit v_server_main;
+
+interface
+
+uses Windows, Messages, SysUtils, Forms, Dialogs, ImgList, Controls, Menus, Grids, Math,
+     StdCtrls, Buttons, Classes, ExtCtrls, n_free_functions, INIFiles, ShellAPI,
+     n_CSSservice, v_constants, IBDatabase, IBSQL;
+
+type
+  TForm1 = class(TForm)
+    Panel1: TPanel;
+    btSuspend: TBitBtn;
+    btResume: TBitBtn;
+    ilArm: TImageList;
+    ilDefault: TImageList;
+    ilVlad: TImageList;
+    ilWeb: TImageList;
+    lbAliases: TLabel;
+    bbLogCounts: TBitBtn;
+    bbStop: TBitBtn;
+    bbFillarWares: TBitBtn;
+    ilWebArm: TImageList;
+    Button1: TButton;
+    procedure FormCreate(Sender: TObject);
+    procedure btSuspendClick(Sender: TObject);
+    procedure btResumeClick(Sender: TObject);
+    procedure FormClose(Sender: TObject; var Action: TCloseAction);
+    procedure bbLogCountsClick(Sender: TObject);
+    procedure bbStopClick(Sender: TObject);
+    procedure bbFillarWaresClick(Sender: TObject);
+    procedure Button1Click(Sender: TObject);
+
+  private { Private declarations }
+    procedure WmQueryEndSession(var Msg: TWmQueryEndSession); message wm_QueryEndSession; // завершение работы Windows
+
+  protected
+    procedure TrayIconMessage(var Message: TMessage); message WM_ICONTRAY;
+    Procedure ControlWindow(Var Msg: TMessage); message WM_SYSCOMMAND;
+
+  public { Public declarations }
+    procedure PopupMenuItemsClick(Sender: TObject);
+    procedure PopupMenuPopup(Sender: TObject);
+    procedure CreatePopupMenu;
+  end;
+
+
+
+var
+  Form1: TForm1;
+
+implementation
+
+uses v_Functions, n_CSSThreads, v_server_common, v_DataTrans,
+     n_DataCacheInMemory, n_LogThreads, n_server_common, n_DataSetsManager,
+  v_WebArmProcedures;
+
+{$R *.dfm}
+//==================================================== завершение работы Windows
+procedure TForm1.WmQueryEndSession(var Msg: TWmQueryEndSession);
+begin
+  inherited;   // сначала сообщение должен обработать наследуемый метод
+  Msg.Result:= 1;
+  if not IsServiceCSS then begin  // приложение
+    Close;
+    prMessageLOG('Завершение работы программы', 'system');
+    prMessageLOG(StringOfChar('+', 50), 'system');
+    Halt; // закрыть программу (сама не закрывается)
+  end;
+end;
+//==============================================================================
+procedure TForm1.TrayIconMessage(var Message: TMessage);
+begin
+  case Message.LParam of
+    WM_RBUTTONUP:  // щелчок правой кнопкой - показываем меню
+      if Assigned(PopupMenuIcon) then with Mouse.CursorPos do PopupMenuIcon.Popup(X, Y);
+//    WM_LBUTTONUP:      // щелчок левой кнопкой
+    WM_LBUTTONDBLCLK:  // двойной щелчок левой кнопкой - прячем или показываем окно
+      if Visible then Hide else Show;
+  end; // case
+end;
+//==============================================================================
+Procedure TForm1.ControlWindow(Var Msg: TMessage);
+Begin
+  IF (Msg.WParam=SC_MINIMIZE) or (Msg.WParam=SC_CLOSE) then Hide // Скрываем программу
+  else inherited;
+End;
+//========================================================== создаем меню иконки
+procedure TForm1.CreatePopupMenu;
+var i,j: integer;
+    aCaptions: Tas;
+begin
+  try
+    PopupMenuIcon:= TPopupMenu.Create(self);
+    PopupMenuIcon.AutoHotkeys:= maManual;
+    PopupMenuIcon.Tag:= 0; // индекс пункта информации
+    PopupMenuIcon.AutoPopup:= False;
+    PopupMenuIcon.Alignment:= paRight;
+    PopupMenuIcon.WindowHandle:= Form1.Handle;
+    PopupMenuIcon.OnPopup:= PopupMenuPopup;
+
+    SetLength(aCaptions, 9); // названия пунктов меню
+    aCaptions[0]:= '-'; // пункт информации - имя и состояние сервиса
+    aCaptions[1]:= '-'; // разделитель
+    aCaptions[2]:= 'Остановить '+Application.Name; // Items[i].Tag=0
+    aCaptions[3]:= '-'; // разделитель
+    aCaptions[4]:= 'Показать окно';               // Items[i].Tag=1
+    aCaptions[5]:= 'Скрыть окно';                 // Items[i].Tag=2
+    aCaptions[6]:= '-'; // разделитель
+    aCaptions[7]:= 'Suspend';                     // Items[i].Tag=3
+    aCaptions[8]:= 'Resume';                      // Items[i].Tag=4
+
+    j:= 0;
+    for i:= 0 to Length(aCaptions)-1 do begin
+      PopupMenuIcon.Items.Add(TMenuItem.Create(PopupMenuIcon));
+      PopupMenuIcon.Items[PopupMenuIcon.Items.Count-1].Caption:= aCaptions[i];
+      if (aCaptions[i][1]<>'-') then begin // если не разделитель или информация
+        PopupMenuIcon.Items[PopupMenuIcon.Items.Count-1].Tag:= j;
+        PopupMenuIcon.Items[PopupMenuIcon.Items.Count-1].OnClick:= PopupMenuItemsClick;
+        inc(j);
+      end;
+    end;
+  finally
+    SetLength(aCaptions, 0);
+  end;
+end;
+//======================================================= показываем меню иконки
+procedure TForm1.PopupMenuPopup(Sender: TObject);
+var i: integer;
+begin
+  PopupMenuIcon.Items[PopupMenuIcon.Tag].Caption:= // имя и состояние сервиса
+    Application.Name+' - '+arCSSServerStatusNames[AppStatus];
+  for i:= 0 to PopupMenuIcon.Items.Count-1 do
+    case PopupMenuIcon.Items[i].Tag of
+      1:  PopupMenuIcon.Items[i].Enabled:= not Visible;          // Показать окно
+      2:  PopupMenuIcon.Items[i].Enabled:= Visible;              // Скрыть окно
+      3:  PopupMenuIcon.Items[i].Enabled:= AppStatus in [stWork];      // Suspend
+      4:  PopupMenuIcon.Items[i].Enabled:= AppStatus in [stSuspended]; // Resume
+    end;
+  SetForegroundWindow(Handle);
+end;
+//=================================================== выбираем пункт меню иконки
+procedure TForm1.PopupMenuItemsClick(Sender: TObject);
+begin
+  case TMenuItem(Sender).Tag of
+    0:  begin
+          ServiceGoOut:= True;                // устанавливаем флаг - Остановить
+          prMessageLOGS('Выбран пункт PopupMenu: Завершить работу', 'system');
+          if not IsServiceCSS then Close;
+        end;
+    1:  if not Visible then Show; // Показать окно
+    2:  if Visible then Hide;     // Скрыть окно
+    3:  prSafeSuspendAll;                     // Suspend
+    4:  begin                                 // Resume
+          SetLength(StopList,0);
+          prResumeAll;
+        end;
+  end;
+end;
+//===================================================
+procedure TForm1.FormCreate(Sender: TObject);
+var ar: Tas;
+    rIniFile: TINIFile;
+begin
+  rIniFile:=nil;
+  try
+    Caption:= Application.Title+'Запускаюcь...';
+    lbAliases.Caption:= '';
+
+    if not IsServiceCSS then begin
+      Position:= poDesigned;            // положение формы
+      rIniFile:= TINIFile.Create(nmIniFileBOB);
+      ar:= fnSplitString(rIniFile.ReadString('service', 'fbounds', ''));
+      if (length(ar)<4) then // форму на верх экрана
+        Form1.SetBounds((Screen.Width-Width) div 2, 0, Width, Height)
+      else
+        Form1.SetBounds(StrToIntDef(ar[0], Left), StrToIntDef(ar[1], Top),
+          StrToIntDef(ar[2], Width), StrToIntDef(ar[3], Height));
+    end;
+    ImageList:= GetAppImageList; // определяем ImageList
+    ImageList.GetBitMap(stSuspended, btSuspend.Glyph);
+    ImageList.GetBitMap(stWork, btResume.Glyph);
+    SetAppStatus(stStarting);
+
+    if not IsServiceCSS then begin
+      BorderIcons:= BorderIcons-[biMinimize, biMaximize];
+      Randomize;
+      IconID:= Random(High(Word)-1); // id иконки
+      CreatePopupMenu;
+      SetTrayIconData; // если добавили иконку в трей - взводим флаг существования иконки
+      fIconExist:= Shell_NotifyIcon(NIM_ADD, @TrayIconData); // флаг существования иконки
+      Application.ProcessMessages;
+      iAppStatus:= 0;
+    end;
+  finally
+    setLength(ar, 0);
+    prFree(rIniFile);
+  end;
+end;
+//===================================================
+procedure TForm1.btSuspendClick(Sender: TObject);
+begin
+  prSafeSuspendAll;
+end;
+procedure TForm1.Button1Click(Sender: TObject);
+begin
+  Button1.Enabled:=false;
+  prGetRadiatorList;
+  Button1.Enabled:=true;
+end;
+
+//===================================================
+procedure TForm1.btResumeClick(Sender: TObject);
+begin
+  SetLength(StopList, 0);
+  prResumeAll;
+end;
+//===================================================
+procedure TForm1.FormClose(Sender: TObject; var Action: TCloseAction);
+var rIniFile: TINIFile;
+begin
+  rIniFile:=nil;
+  try
+    if IsServiceCSS then begin
+      Action:= caNone;
+      if flCSSnew then Application.Minimize else Hide;
+
+    end else begin
+      rIniFile:= TINIFile.Create(nmIniFileBOB);
+      rIniFile.WriteString('service', 'fbounds', IntToStr(Left)+';'+
+        IntToStr(Top)+';'+IntToStr(Width)+';'+IntToStr(Height));
+      if not ServiceGoOut and
+        (fnMessageDlg('Остановить?', mtConfirmation, [mbYes, mbNo], 0, Form1)=mrNo) then begin
+        Action:= caNone;
+        exit;
+      end;
+      if not (AppStatus in [stClosed]) then prServerExit;
+      if not IsServiceCSS and fIconExist then Shell_NotifyIcon(NIM_DELETE, @TrayIconData);
+    end;
+  finally
+    prFree(rIniFile);
+  end;
+end;
+//===================================================
+procedure TForm1.bbLogCountsClick(Sender: TObject);
+begin
+  TestConnections(true);
+end;
+
+//-------------------------------------------------------------------- остановка
+procedure TForm1.bbStopClick(Sender: TObject);
+begin
+  if fnMessageDlg('Остановить?', mtConfirmation, [mbYes, mbNo], 0, Form1)=mrNo then exit;
+  ServiceGoOut:= True;                // устанавливаем флаг - Остановить
+  prMessageLOGS('Нажата кнопка: Остановить', 'system');
+  if not IsServiceCSS then Form1.Close;
+end;
+//--------------------------------------------------- заполнение / проверка кэша
+procedure TForm1.bbFillarWaresClick(Sender: TObject);
+//var Time: tDateTime;
+begin
+  with TCSSCyclicThread(thCheckDBConnectThread) do
+    if ExpressFlag or Cache.WareCacheTested then
+      fnMessageDlg('Выполняется '+fnIfStr(ExpressFlag, 'срочная', 'штатная')+
+        ' проверка кеша', mtInformation, [mbOk], 0, Form1)
+    else ExpressFlag:= True;
+end;
+//===================================================
+
+end.
+

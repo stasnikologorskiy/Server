@@ -1,0 +1,1439 @@
+unit v_server_common;
+
+interface
+uses SysUtils, DB, Forms, Classes, IniFiles, Controls, ShellAPI,
+     IBDataBase, IBSQL, IdGlobal, IdContext, IdTCPServer, {IdObjs, DBTables, }n_free_functions,
+     v_DataTrans, v_constants, v_functions,
+     n_LogThreads, n_DataSetsManager, n_functions, n_server_common, n_CSSThreads;
+
+type
+  TMyClass = class
+    procedure ServerExecute(AContext: TIdContext);
+    procedure ServerWEBConnect(AContext: TIdContext);
+    procedure ServerWEBArmConnect(AContext: TIdContext);
+    procedure ServerManageConnect(AContext: TIdContext);
+  public
+  end;
+
+var
+  AppStatus: integer; //Статус приложения
+  StopList: Tas;
+  ManageCommandsLock: boolean = false;
+
+//  OnlineOrderTimeout: integer; // время жизни сессии web-пользователя системы online-заказов (в минутах)
+//  WebArmTimeout: integer; // время жизни сессии webarm-пользователя системы
+  WarrantValidTerm: Integer;   // время действительности доверенности
+
+  GBWork: boolean; // признаки работоспособности GB
+
+  thCheckStoppedOrders: TThread;
+  thCheckDBConnectThread: TThread;
+  thManageThread: TThread;
+
+  ServerWeb, ServerWebArm, ServerManage: TIDTCPServer;
+
+  MyClass: TMyClass;
+
+  ImageList: TImageList;
+
+  GBLogin: string = 'ORDERAUTO';
+//  GBPass: string = '12345';
+
+//  DBOrderLogin: string = 'ORDERAUTO';
+//  DBOrderPass: string = '12345';
+
+//  OrderWareSearchResultLimit: integer = 20; // максимально допустимое кол-во товаров в результатах поиска
+  DescrDir: string; // папка, родительская для рисунков и описаний
+
+
+  function fnGetNumOrder(Prefix, NumOrd: String; Source: Integer=5): String; // формируем номер заказа для сервера
+  function fnCheckOrderWebLogin(S: string): boolean;
+  function fnCheckOrderWebPassword(S: string): boolean;
+  function fnGenWebPass: string;  // Генерирует пароль
+
+  function fnGetThreadsCount(Server: TIdTCPServer): integer;
+
+  procedure SetAppCaption;                 // заголовок формы
+  function GetAppImageList: TImageList;    // иконка
+  procedure SetAppStatus(Status: integer); // устанавливает атрибутику статусов приложения
+
+//  function fnCheckKindOfStorage(StorageId, FirmId, Kind: integer) : boolean; // проверяет свойство заданного склада
+//  function fnGetAnalogsAll(WareID, ManufID, FirmId: integer): TaAM; // получает рассортироdанные по признакам аналоги товара  WareID
+
+  // Функция для пользовательской сортировки товаров в StringList с учетом бренда
+  function fnWareCompareByBrand(List: TStringList; Index1, Index2: Integer): Integer;
+
+  // Функция получения товаров по заданному бренду
+function fnGetWareListByBrand(Brand: integer; Sys: byte = 255; Sort: boolean = false): TStringList;
+
+// выдает значение системной настройки, адаптированное под вывод пользователю
+function fnGetAdaptedConstValue(ConstID: integer): string;
+
+// проверяет, просрочено ли время доставки
+function CheckShipmentDateTime(Data: TDate; TimeCode: integer): boolean;
+
+// используется для сортировки объектов типа TTwoCodes в TObjectList при выводе списка типов товаров в результатах поиска
+function CompareTypeNamesForTwoCodes(Item1, Item2: Pointer): Integer;
+// используется для сортировки объектов типа TTwoCodes в TObjectList при выводе списка производителей авто/мото
+function CompareManufacturerNamesForTwoCodes(Item1, Item2: Pointer): Integer;
+// используется для сортировки StringList в TObjectList при выводе порций условий применимости
+function CompareConditionPortions(Item1, Item2: Pointer): Integer;
+
+implementation
+uses n_constants, v_OnlineOrderPocedures, v_server_main, v_CSSServerManageProcs,
+     v_WebArmProcedures,
+     n_vlad_init, n_MailServis, n_CSSservice, n_DataCacheInMemory,
+     n_OnlinePocedures, n_WebArmProcedures, t_WebArmProcedures;
+//============================================================
+
+//============================================================
+function fnGetThreadsCount(Server: TIdTCPServer): integer;
+var
+  aList: TList;
+begin
+  aList:= Server.Contexts.LockList;
+  try
+    Result:= aList.Count;
+  except
+    Result:= 0;
+  end;
+  Server.Contexts.UnlockList;
+end;
+
+//=========================================== формируем номер заказа для сервера
+function fnGetNumOrder(Prefix, NumOrd: String; Source: Integer=5): String;
+// FirmCod - код фирмы, NumOrd - № заказа клиента, Source - источник (по умолчанию: 5-Vlad)
+var s: String;
+begin
+  if pos('_',NumOrd)>0 then begin
+    Result:= NumOrd;
+    Exit;
+  end;
+  case Source of
+    5: s:= '_V_'; // разделитель для Автомат.заказа через программу "vlad"
+    6: s:= '_W_'; // разделитель для Автомат.заказа через Интернет
+  else s:= '_';   // разделитель для других источников
+  end; // case
+  Result:= Prefix+s+NumOrd; // номер заказа: FirmShortName(FirmCod)_V(Source)_NumOrd
+end;
+
+//================= проверяет валидность логина Web-пользователя системы заказов
+function fnCheckOrderWebLogin(S: string): boolean;
+var
+  i, j: integer;
+  c:  Char;
+//  ss: ANSIstring[1];
+begin
+  Result:=true;
+  j:=Length(s);
+  if j<5 then begin
+    Result:=false;
+    exit;
+  end;
+  if j>20 then begin
+    Result:=false;
+    exit;
+  end;
+  for i:=1 to j do begin
+//    ss:=Copy(s, i, 1);
+    c:=s[i];
+    if not (SysUtils.CharInSet(c, ['a'..'z', 'A'..'Z', '0'..'9', '_'])) then begin
+      Result:=false;
+      break;
+    end;
+  end;
+end;
+
+//================= проверяет валидность пароля Web-пользователя системы заказов
+function fnCheckOrderWebPassword(S: string): boolean;
+var
+  i, j: integer;
+  c:  Char;
+//  ss: string[1];
+begin
+  Result:=true;
+  j:=Length(s);
+  if j<5 then begin
+    Result:=false;
+    exit;
+  end;
+  if j>20 then begin
+    Result:=false;
+    exit;
+  end;
+  for i:=1 to j do begin
+//    ss:=Copy(s, i, 1);
+    c:=s[i];
+    if not (SysUtils.CharInSet(c, ['a'..'z', 'A'..'Z', '0'..'9', '_'])) then begin
+      Result:=false;
+      break;
+    end;
+  end;
+end;
+
+//============================================================ Генерирует пароль
+function fnGenWebPass: string;
+var
+ len: integer;
+ c: char;
+begin
+  Result:='';
+  Randomize;
+  len:=5+Random(4);
+  while Length(Result)<(len+1) do begin
+    c:=char(48+Random(123-48));
+    if (SysUtils.CharInSet(c, ['a'..'z', '0'..'9'])) then begin
+      Result:=Result+c;
+    end;
+  end;
+end;
+
+//========================================================= определяем ImageList
+function GetAppImageList: TImageList;
+var i: integer;
+    nImageList: string;
+begin
+  Result:= Form1.ilDefault;
+  nImageList:= GetIniParam(nmIniFileBOB,'service','ImageList',''); // читаем имя ImageList из ini-файла
+  if nImageList='' then Exit;
+  for i:= 0 to Form1.ComponentCount-1 do
+    if (Form1.Components[i] is TImageList) and
+      (Form1.Components[i].Name=nImageList) then begin
+      Result:= (Form1.Components[i] as TImageList);
+      break;
+    end;
+end;
+//============================================================== заголовок формы
+procedure SetAppCaption;
+begin
+  Form1.lbAliases.Caption:= 'CSS-server,  GrossBee: '+cntsGRB.dbPath;
+end;
+
+//================================= устанавливает атрибутику статусов приложения
+procedure SetAppStatus(Status: integer);
+begin
+  AppStatus:=Status;
+  Form1.Caption:=Application.Title+': '+fnIfStr(IsServiceCSS, 'Служба ', 'Приложение ')+arCSSServerStatusNames[Status];
+  if not IsServiceCSS and (Form1.Caption[length(Form1.Caption)]='а') then
+    Form1.Caption:=Copy(Form1.Caption, 1, length(Form1.Caption)-1)+'о';
+  ImageList.GetIcon(AppStatus,Application.Icon); // меняем Application.Icon
+  Form1.btSuspend.Enabled:=(AppStatus=stWork);
+  Form1.btResume.Enabled:=(AppStatus=stSuspended);
+  Form1.bbFillarWares.Enabled:= (AppStatus=stWork);
+  if not IsServiceCSS and fIconExist then begin
+    SetTrayIconData;
+    Shell_NotifyIcon(NIM_MODIFY, @TrayIconData);
+    Application.ProcessMessages;
+  end;                                               
+
+end;
+
+{
+//========================================== проверяет свойство заданного склада
+function fnCheckKindOfStorage(StorageId, FirmId, Kind: integer) : boolean;
+var
+  i: integer;
+begin
+
+  Result:=false;
+  i:=Cache.GetStorageIndex(StorageId, FirmId);
+  if i>-1 then case Kind of
+    constStorDefault:   Result:=Cache.arFirmInfo[FirmID].Storages[i].IsDefault;
+    constStorVisible:   Result:=Cache.arFirmInfo[FirmID].Storages[i].IsVisible;
+    constStorReserve:   Result:=Cache.arFirmInfo[FirmID].Storages[i].IsReserve;
+    constStorSale   :   Result:=Cache.arFirmInfo[FirmID].Storages[i].IsSale;
+  end;
+end;
+}
+
+//==========================================================  TMyClass
+procedure TMyClass.ServerExecute(AContext: TIdContext);
+begin
+;
+end;
+
+procedure TMyClass.ServerWebConnect(AContext: TIdContext);
+var
+  Stream : TBOBMemoryStream;
+  i : integer;
+  AThread: TIdContext;
+  Command: word;
+  ThreadData: TThreadData;
+  ErrorPos: string;
+begin
+  ErrorPos:='0';
+  AThread:=AContext;
+  ThreadData:= nil;
+  Stream:= nil;
+try
+  ErrorPos:='1';
+  //  Command:=65535;
+  ErrorPos:='2';
+  //  Memo1.Lines.add('Вижу коннект');
+    i:=AThread.Connection.IOHandler.ReadLongInt;
+  ErrorPos:='3';
+//    ThreadData:= fnCreateThread(fnSignatureToThreadType(i));
+    case i of
+      csOnlineOrder: begin // если это запрос от Web-пользователя системы онлайн-заказов
+  //    sleep(10000);
+  ErrorPos:='8';
+        AThread.Connection.IOHandler.ReadLongInt;                // принимаем SessionID, который в данном случае нафиг не нужен
+  //      i:=AThread.Connection.IOHandler.ReadInteger;                // принимаем SessionID, который в данном случае нафиг не нужен
+  ErrorPos:='8-2';
+        Command:=word(AThread.Connection.IOHandler.ReadSmallInt);   // принимаем команду
+
+//        prSetThLogParams(ThreadData,Integer(Command),0,0,''); // логирование в ib_css
+        ThreadData:= fnCreateThread(fnSignatureToThreadType(i), Integer(Command));  //
+
+  ErrorPos:='8-3';
+        i:=AThread.Connection.IOHandler.ReadLongInt;                // принимаем размер тела запроса
+  ErrorPos:='8-6';
+        Stream :=TBOBMemoryStream.Create;
+  ErrorPos:='8-7';
+        AThread.Connection.IOHandler.ReadStream(Stream, i);         // принимаем тело запроса
+  ErrorPos:='8-8';
+        try
+          if not (GetAllBasesConnected and (AppStatus=stWork))
+            then raise EBOBError.Create(GetMessageNotCanWorks);
+  ErrorPos:='8-8-1';
+          if (fnGetThreadsCount(ServerWeb)>Cache.GetConstItem(pcMaxServerWebConnect).IntValue)
+            then raise EBOBError.Create('Сервер перегружен, повторите запрос через несколько секунд');
+  ErrorPos:='8-8-2';
+          case Command of
+            csWebAutentication: begin
+              prAutenticateOrd(Stream, ThreadData)
+            end;
+            csGetAllUsersInfo: begin
+              prGetAllUsersInfo(Stream, ThreadData);
+            end;
+            csSearchWithOrNums: begin
+//            csWareSearch: begin
+//              prWareSearch(Stream, ThreadData);
+              prCommonWareSearch(Stream, ThreadData);
+            end;
+            csWebArmGetAnalogs: begin
+//            csGetAnalogs: begin
+//              prGetAnalogs(Stream, ThreadData);
+              prGetWareAnalogs(Stream, ThreadData);
+            end;
+            csCreateNewOrder: begin
+              prCreateNewOrderOrd(Stream, ThreadData);
+            end;
+            csGetOrderList: begin
+              prGetOrderListOrd(Stream, ThreadData);
+            end;
+            csShowOrder: begin
+              prShowOrderOrd(Stream, ThreadData);
+            end;
+            csShowACOrder: begin
+              prShowACOrderOrd(Stream, ThreadData);
+            end;
+            csDelLineFromOrder: begin
+              prDelLineFromOrderOrd(Stream, ThreadData);
+            end;
+            csChangeQtyInOrderLine: begin
+              prChangeQtyInOrderLineOrd(Stream, ThreadData);
+            end;
+            csSendOrderToProcessing: begin
+              prSendOrderToProcessingOrd(Stream, ThreadData);
+            end;
+            csRefreshPrices: begin
+              prRefreshPricesOrd(Stream, ThreadData);
+            end;
+            csCreateOrderByMarked: begin
+              prCreateOrderByMarkedOrd(Stream, ThreadData);
+            end;
+            csJoinMarkedOrders: begin
+              prJoinMarkedOrdersOrd(Stream, ThreadData);
+            end;
+            csEditOrderHeader: begin
+              prEditOrderHeaderOrd(Stream, ThreadData);
+            end;
+            csGetAccountList: begin
+              prGetAccountListOrd(Stream, ThreadData);
+            end;
+            csGetWaresFromAccountList: begin
+              prGetWaresFromAccountList(Stream, ThreadData);
+            end;
+            csShowGBAccount: begin
+              prShowGBAccountOrd(Stream, ThreadData);
+            end;
+            csShowGBOutInvoice: begin
+              prShowGBOutInvoice(Stream, ThreadData);
+            end;
+            csGetUnpayedDocs: begin
+              prGetUnpayedDocs(Stream, ThreadData);
+            end;
+            csDeleteOrderByMark: begin
+              prDeleteOrderByMarkOrd(Stream, ThreadData);
+            end;
+            csRefreshPricesInFormingOrders: begin
+              prRefreshPricesInFormingOrdersOrd(Stream, ThreadData);
+            end;
+            csSetReservValue: begin
+              prSetReservValueOrd(Stream, ThreadData);
+            end;
+            csSetOrderPayType: begin
+              prSetOrderPayTypeOrd(Stream, ThreadData);
+            end;
+            csGetOptions: begin
+              prGetOptionsOrd(Stream, ThreadData)
+            end;
+            csSetOrderDefault: begin
+              prSetOrderDefaultOrd(Stream, ThreadData)
+            end;
+            csChangePassword: begin
+              prChangePasswordOrd(Stream, ThreadData)
+            end;
+            csWebSetMainUser: begin
+              prWebSetMainUserOrd(Stream, ThreadData)
+            end;
+            csWebResetPassword: begin
+              prWebResetPasswordOrd(Stream, ThreadData)
+            end;
+            csWebCreateUser: begin
+              prWebCreateUserOrd(Stream, ThreadData)
+            end;
+//            csGetWebStat: begin
+//              prGetWebStatOrd(Stream, ThreadData);
+//            end;
+            csChangePass: begin
+              prChangePasswordOrd(Stream, ThreadData)
+            end;
+            csGetRegisterTable: begin
+              prGetRegisterTableOrd(Stream, ThreadData)
+            end;
+            csCheckLogin: begin
+              prCheckLoginOrd(Stream, ThreadData)
+            end;
+            csSaveRegOrder: begin
+              prSaveRegOrderOrd(Stream, ThreadData)
+            end;
+            csGetCheck: begin
+              prGetCheck(Stream, ThreadData);
+            end;
+            csShowGBBack: begin
+              prShowGBBack(Stream, ThreadData);
+            end;
+            csSendMessage2Manager: begin
+              prSendMessage2Manager(Stream, ThreadData);
+            end;
+            csGetSaleBrands: begin
+              prGetSaleBrands(Stream, ThreadData);
+            end;
+            csAddLinesToOrder: begin
+              prAddLinesToOrderOrd(Stream, ThreadData);
+            end;
+            csGetQtyByAnalogsAndStorages: begin
+              if flClientStoragesView_2col then
+                prGetQtyByAnalogsAndStoragesOrd_2col(Stream, ThreadData) else
+              prGetQtyByAnalogsAndStoragesOrd(Stream, ThreadData);
+            end;
+            csAddLineFromSearchResToOrder: begin
+              prAddLineFromSearchResToOrderOrd(Stream, ThreadData);
+            end;
+            csChangeVisibilityOfStorage: begin
+              prChangeVisibilityOfStorage(Stream, ThreadData);
+            end;
+            csClientsStoreMove: begin
+              prClientsStoreMove(Stream, ThreadData);
+            end;
+            csGetVladInitFile: begin
+              prGetVladInitFile(Stream, ThreadData);
+            end;
+            csGetManufacturerList: begin
+              prGetManufacturerList(Stream, ThreadData);
+            end;
+            csOrdGetWareInfo: begin
+              prGetWareInfoView(Stream, ThreadData);
+            end;
+            csOrdGetListAttrGroupNames: begin
+              prGetListAttrGroupNames(Stream, ThreadData);
+            end;
+            csOrdGetListGroupAttrs: begin
+              prGetListGroupAttrs(Stream, ThreadData);
+            end;
+(*
+            csOrdSearchWaresByAttrValues: begin
+              prSearchWaresByAttrValues(Stream, ThreadData);
+            end;
+*)
+            csSearchWaresByAttrValues: begin
+              prCommonSearchWaresByAttr(Stream, ThreadData);
+            end;
+            csGetCompareWaresInfo: begin
+              prGetCompareWaresInfo(Stream, ThreadData);
+            end;
+            csOrdGetModelLineList: begin
+              prGetModelLineList(Stream, ThreadData);
+            end;
+//            csOrdGetModelLineModels: begin
+            csGetModelLineModels: begin
+//              prGetModelLineModels(Stream, ThreadData);  // это старый отдеьлно для Web, заменил его на webarm`овский
+              prGetModelLineModels(Stream, ThreadData);
+            end;
+            csGetModelTree: begin
+              prGetModelTree(Stream, ThreadData);
+            end;
+            csGetNodeWares: begin
+  //            prGetNodeWares(Stream, ThreadData);
+              prCommonGetNodeWares(Stream, ThreadData);
+            end;
+(*
+            csOrdGetNodeWares: begin
+              prGetNodeWares(Stream, ThreadData);
+            end;
+*)
+            csOrdSendWareDescrErrorMes: begin
+              prSendWareDescrErrorMes(Stream, ThreadData);
+            end;
+            csShowModelsWhereUsed: begin
+              prShowModelsWhereUsed(Stream, ThreadData);
+            end;
+            csGetRestsOfWares: begin
+//              prGetRestsOfWares(Stream, ThreadData);
+              prCommonGetRestsOfWares(Stream, ThreadData);
+            end;
+            csGetActions: begin
+              prGetActions(Stream, ThreadData);
+            end;
+            csGetTop10Model: begin
+              prGetTop10Model(Stream, ThreadData);
+            end;
+            csClickOnNewsCounting: begin
+              prClickOnNewsCounting(Stream, ThreadData);
+            end;
+            csLoadEngines: begin
+              prLoadEngines(Stream, ThreadData);
+            end;
+            csGetEngineTree: begin
+              prGetEngineTree(Stream, ThreadData);
+            end;
+            csShowEngineOptions: begin
+              prShowEngineOptions(Stream, ThreadData);
+            end;
+            csLoadModelDataText: begin
+              prLoadModelDataText(Stream, ThreadData);
+            end;
+            csTestLinksLoading: begin
+              prTestLinksLoading(Stream, ThreadData);
+            end;
+            csGetFilterValues: begin
+              prGetFilterValues(Stream, ThreadData);
+            end;
+            csBackJobAutentication: begin
+              prAutenticateOrd(Stream, ThreadData);
+            end;
+            csSaveOption: begin
+              prSaveOption(Stream, ThreadData);
+            end;
+            csGetSatellites: begin
+              prGetWareSatellites(Stream, ThreadData);
+            end;
+            csSendVINOrder: begin
+              prSendVINOrder(Stream, ThreadData);
+            end;
+            csGetWaresByOE: begin
+  //            prGetWaresByOE(Stream, ThreadData);
+              prCommonGetWaresByOE(Stream, ThreadData);
+            end;
+            csHideEmptyOE: begin
+               prHideEmptyOE(Stream, ThreadData);
+            end;
+            csDownloadPrice: begin
+              prDownloadPrice(Stream, ThreadData);
+            end;
+            csShowNotification: begin
+              prShowNotificationOrd(Stream, ThreadData);
+            end;
+            csConfirmNotification: begin
+              prConfirmNotification(Stream, ThreadData);
+            end;
+            csWaresByOE: begin
+              prWaresByOE(Stream, ThreadData);
+            end;
+            csContractList: begin
+              prContractList(Stream, ThreadData);
+            end;
+            csChangeContract: begin
+               prChangeClientLastContract(Stream, ThreadData);
+            end;
+            csChangeContractAccess: begin
+              prChangeContractAccess(Stream, ThreadData);
+            end;
+            csSendOrderForChangePersonData: begin
+              prSendOrderForChangePersonData(Stream, ThreadData);
+            end;
+            csSendOrderForAddContactPerson: begin
+              prSendOrderForAddContactPerson(Stream, ThreadData);
+            end;
+            csSetCliContMargins: begin
+              prSetCliContMargins(Stream, ThreadData);
+            end;
+            csRemindPass: begin
+              prRemindPass(Stream, ThreadData);
+            end;
+{
+            cs: begin
+              pr(Stream, ThreadData);
+            end;
+}
+            else begin
+              raise EBOBError.Create('Не опознана Web-команда - '+IntToStr(Command));
+            end;
+          end;
+        except
+          on E: Exception do begin
+            Stream.Clear;
+            Stream.WriteInt(aeCommonError);
+            if (Command<>csTestLinksLoading) and (AppStatus=stWork) then
+              fnWriteToLog(ThreadData, lgmsSysError, 'TMyClass.ServerWebConnect', 'Command='+IntToStr(Command), E.Message, 'ErrorPos='+ErrorPos);
+            Stream.WriteStr('Сервер сообщает об ошибке: '#13#10+E.Message);
+          end;
+        end;
+  ErrorPos:='8-9';
+        If Stream.Size>0 then begin
+          i:=Stream.Size;
+  ErrorPos:='8-10: Stream.Size='+IntToStr(i);
+          AThread.Connection.IOHandler.Write(i);              //
+  ErrorPos:='8-11: Stream.Size='+IntToStr(i);
+          AThread.Connection.IOHandler.Write(Stream);         // возвращаем ответ на запрос
+  ErrorPos:='8-12';
+        end;
+        AThread.Connection.Disconnect;
+        prFree(Stream);
+      end;
+
+      else begin // если неизвестная сигнатура
+  ErrorPos:='9';
+        AThread.Connection.Disconnect;
+      end; //end of "else" branch of case
+    end;
+
+  except
+    on E: Exception do begin
+      fnWriteToLog(ThreadData, lgmsSysError, 'TMyClass.ServerWebConnect', 'Ошибка общего плана ', E.Message, 'ErrorPos='+ErrorPos);
+      fnWriteToLog(ThreadData, lgmsInfo, 'TMyClass.ServerWebConnect', 'Аварийно завершен поток ', E.Message, 'ErrorPos='+ErrorPos);
+    end;
+  end;
+  prDestroyThreadData(ThreadData, 'TMyClass.ServerWebConnect');
+  if (AThread<>nil) and AThread.Connection.Connected then AThread.Connection.Disconnect;
+  prFree(Stream);
+end; //ServerWebConnect
+
+procedure TMyClass.ServerWebArmConnect(AContext: TIdContext);
+var
+  Stream : TBOBMemoryStream;
+  i : integer;
+  AThread: TIdContext;
+  Command: word;
+  ThreadData: TThreadData;
+  ErrorPos: string;
+begin
+  ErrorPos:='0';
+  AThread:=AContext;
+  ThreadData:= nil;
+  Stream:=nil;
+try
+  ErrorPos:='1';
+  ErrorPos:='2';
+    i:=AThread.Connection.IOHandler.ReadLongInt;
+  ErrorPos:='3';
+//    ThreadData:= fnCreateThread(fnSignatureToThreadType(i));
+    if i=csWebArm then begin // если это запрос от WebArm-пользователя
+  ErrorPos:='8';
+      AThread.Connection.IOHandler.ReadLongInt;                // принимаем SessionID, который в данном случае нафиг не нужен
+      Command:=word(AThread.Connection.IOHandler.ReadSmallInt);   // принимаем команду
+//      prSetThLogParams(ThreadData,Command);
+      ThreadData:= fnCreateThread(fnSignatureToThreadType(i), Integer(Command));
+
+      i:=AThread.Connection.IOHandler.ReadLongInt;                // принимаем размер тела запроса
+      Stream :=TBOBMemoryStream.Create;
+      AThread.Connection.IOHandler.ReadStream(Stream, i);         // принимаем тело запроса
+      try
+        if not (GetAllBasesConnected and (AppStatus=stWork))
+          then raise EBOBError.Create(GetMessageNotCanWorks);
+        case Command of
+          csWebArmAutentication: begin
+            prWebArmAutenticate(Stream, ThreadData);
+          end;
+          csShowWebArmUsers: begin
+            prShowWebArmUsers(Stream, ThreadData);
+          end;
+          csAEWebArmUser: begin
+            prAEWebArmUser(Stream, ThreadData);
+          end;
+(*
+          csAnalystReports: begin
+            prAnalystReports(Stream, ThreadData);
+          end;
+          csAnalystReport1: begin
+            prAnalystReport1(Stream, ThreadData);
+          end;
+*)
+          csProductPage: begin
+            prProductPage(Stream, ThreadData);
+          end;
+          csProductWareSearch: begin
+            prProductWareSearch(Stream, ThreadData);
+          end;
+          csProductGetOrigNumsAndWares: begin
+            prProductGetOrigNumsAndWares(Stream, ThreadData);
+          end;
+          csProductAddOrigNum: begin
+            prProductAddOrigNum(Stream, ThreadData);
+          end;
+          csProductDelOrigNum: begin
+            prProductDelOrigNum(Stream, ThreadData);
+          end;
+{
+          csProductAddAnalog: begin
+            prProductAddAnalog(Stream, ThreadData);
+          end;
+          csProductDelAnalog: begin
+            prProductDelAnalog(Stream, ThreadData);
+          end;
+          csProductGetOrigNumsAndWaresFromTecDoc: begin
+            prProductGetOrigNumsAndWaresFromTecDoc(Stream, ThreadData);
+          end;
+          csProductImport: begin
+            prProductImport(Stream, ThreadData);
+          end;
+          csProductGetOrigNumFromGB: begin
+            prProductGetOrigNumFromGB(Stream, ThreadData);
+          end;
+}
+          csAccountsReestrPage: begin
+            prAccountsReestrPage(Stream, ThreadData);
+          end;
+          csAccountsGetFirmList: begin
+            prAccountsGetFirmList(Stream, ThreadData);
+          end;
+//          csAccountsGetAccountsList: begin
+//            prAccountsGetAccountsList(Stream, ThreadData);
+//          end;
+//          csAccountPage: begin
+//            prAccountPage(Stream, ThreadData);
+//          end;
+          csSearchWithOrNums: begin
+//            prWebArmWareSearch(Stream, ThreadData);
+            prCommonWareSearch(Stream, ThreadData);
+          end;
+          csGetManufacturerList: begin
+            prGetManufacturerList(Stream, ThreadData);
+          end;
+          csWebArmGetAnalogs: begin
+//            prWebArmGetAnalogs(Stream, ThreadData);
+            prGetWareAnalogs(Stream, ThreadData);
+          end;
+          csSaveWebArmUsers: begin
+            prSaveWebArmUsers(Stream, ThreadData);
+          end;
+          csManageBrands: begin
+            prManageBrands(Stream, ThreadData);
+          end;
+          csGetBrandsGB: begin
+            prGetBrandsGB(Stream, ThreadData);
+          end;
+          csGetBrandsTD: begin
+            prGetBrandsTD(Stream, ThreadData);
+          end;
+          csGetLinkBrandsGBTD: begin
+            prGetLinkBrandsGBTD(Stream, ThreadData);
+          end;
+          csAddLinkBrandsGBTD: begin
+            prAddLinkBrandsGBTD(Stream, ThreadData);
+          end;
+          csDelLinkBrandsGBTD: begin
+            prDelLinkBrandsGBTD(Stream, ThreadData);
+          end;
+          csUiKPage: begin
+            prUiKPage(Stream, ThreadData);
+          end;
+          csTNAGet: begin
+            prTNAGet(Stream, ThreadData);
+          end;
+          csTNANodeAdd: begin
+            prTNANodeAdd(Stream, ThreadData);
+          end;
+          csTNANodeDel: begin
+            prTNANodeDel(Stream, ThreadData);
+          end;
+          csTNANodeEdit: begin
+            prTNANodeEdit(Stream, ThreadData);
+          end;
+          csTNAManagePage: begin
+            prTNAManagePage(Stream, ThreadData);
+          end;
+          csManufacturerAdd: begin
+            prManufacturerAdd(Stream, ThreadData);
+          end;
+          csManufacturerEdit: begin
+            prManufacturerEdit(Stream, ThreadData);
+          end;
+          csManufacturerDel: begin
+            prManufacturerDel(Stream, ThreadData);
+          end;
+          csGetModelLineList: begin
+            prGetModelLineList(Stream, ThreadData);
+          end;
+          csModelLineAdd: begin
+            prModelLineAdd(Stream, ThreadData);
+          end;
+          csModelLineEdit: begin
+            prModelLineEdit(Stream, ThreadData);
+          end;
+          csModelLineDel: begin
+            prModelLineDel(Stream, ThreadData);
+          end;
+          csWebArmGetRegionalFirms: begin
+            prWebArmGetRegionalFirms(Stream, ThreadData);
+          end;
+          csWebArmGetFirmUsers: begin
+            prWebArmGetFirmUsers(Stream, ThreadData);
+          end;
+          csWebArmResetUserPassword: begin
+            prWebArmResetUserPassword(Stream, ThreadData);
+          end;
+          csWebArmSetFirmMainUser: begin
+            prWebArmSetFirmMainUser(Stream, ThreadData);
+          end;
+//          csGetWebArmSystemStatistic: begin
+//            prGetWebArmSystemStatistic(Stream, ThreadData);
+//          end;
+          csWebArmGetOrdersToRegister: begin
+            prWebArmGetOrdersToRegister(Stream, ThreadData);
+          end;
+          csWebArmAnnulateOrderToRegister: begin
+            prWebArmAnnulateOrderToRegister(Stream, ThreadData);
+          end;
+          csWebArmRegisterOrderToRegister: begin
+            prWebArmRegisterOrderToRegister(Stream, ThreadData);
+          end;
+          csGetFilialList: begin
+            prGetFilialList(Stream, ThreadData);
+          end;
+          csWebArmGetRegionalZones: begin
+            prWebArmGetRegionalZones(Stream, ThreadData);
+          end;
+          csWebArmInsertRegionalZone: begin
+            prWebArmInsertRegionalZone(Stream, ThreadData);
+          end;
+          csWebArmDeleteRegionalZone: begin
+            prWebArmDeleteRegionalZone(Stream, ThreadData);
+          end;
+          csWebArmUpdateRegionalZone: begin
+            prWebArmUpdateRegionalZone(Stream, ThreadData);
+          end;
+(*
+          csGetModelsList: begin
+            prGetModelsList(Stream, ThreadData);
+          end;
+*)
+          csGetModelLineModels: begin
+            prGetModelLineModels(Stream, ThreadData);
+          end;
+          csGetModelTree: begin
+            prGetModelTree(Stream, ThreadData);
+          end;
+          csGetNodeWares: begin
+//            prGetNodeWares(Stream, ThreadData);
+            prCommonGetNodeWares(Stream, ThreadData);
+          end;
+          csModelAddToModelLine: begin
+            prModelAddToModelLine(Stream, ThreadData);
+          end;
+          csModelEdit: begin
+            prModelEdit(Stream, ThreadData);
+          end;
+          csModelDel: begin
+            prModelDel(Stream, ThreadData);
+          end;
+          csModelSetVisible: begin
+            prModelSetVisible(Stream, ThreadData);
+          end;
+          csAutoModelInfoLists: begin
+            prAutoModelInfoLists(Stream, ThreadData);
+          end;
+          csLoadModelData: begin
+            prLoadModelData(Stream, ThreadData);
+          end;
+          csGetListAttrGroupNames: begin
+            prGetListAttrGroupNames(Stream, ThreadData);
+          end;
+          csGetListGroupAttrs: begin
+            prGetListGroupAttrs(Stream, ThreadData);
+          end;
+          csSearchWaresByAttrValues: begin
+//            prSearchWaresByAttrValues(Stream, ThreadData);
+            prCommonSearchWaresByAttr(Stream, ThreadData);
+          end;
+          csGetWareInfoView: begin
+            prGetWareInfoView(Stream, ThreadData);
+          end;
+          csGetCompareWaresInfo: begin
+            prGetCompareWaresInfo(Stream, ThreadData);
+          end;
+          csSendWareDescrErrorMes: begin
+            prSendWareDescrErrorMes(Stream, ThreadData);
+          end;
+          csImportPage: begin
+            prImportPage(Stream, ThreadData);
+          end;
+          csGetBaseStamp: begin
+            prGetBaseStamp(Stream, ThreadData);
+          end;
+          csCommonImport: begin
+            prCommonImport(Stream, ThreadData);
+          end;
+          csCheckWareManager: begin
+            prCheckWareManager(Stream, ThreadData);
+          end;
+          csModifyLink3: begin
+            prModifyLink3(Stream, ThreadData);
+          end;
+          csGetWareList: begin
+            prGetWareList(Stream, ThreadData);
+          end;
+          csLoadModelDataText: begin
+            prLoadModelDataText(Stream, ThreadData);
+          end;
+          csShowModelsWhereUsed: begin
+            prShowModelsWhereUsed(Stream, ThreadData);
+          end;
+          csMarkOrNum: begin
+            prMarkOrNum(Stream, ThreadData);
+          end;
+          csShowCrossOE: begin
+            prShowCrossOE(Stream, ThreadData);
+          end;
+          csShowCurrentOperations: begin
+            prShowCurrentOperations(Stream, ThreadData);
+          end;
+          csStopIEOperation: begin
+            prStopIEOperation(Stream, ThreadData);
+          end;
+          csShowEngineOptions: begin
+            prShowEngineOptions(Stream, ThreadData);
+          end;
+          csGetTop10Model: begin
+            prGetTop10Model(Stream, ThreadData);
+          end;
+          csLoadEngines: begin
+            prLoadEngines(Stream, ThreadData);
+          end;
+          csGetEngineTree: begin
+            prGetEngineTree(Stream, ThreadData);
+          end;
+          csNewsPage: begin
+            prNewsPage(Stream, ThreadData);
+          end;
+          csWebArmResetPassword: begin
+            prWebArmResetPassword(Stream, ThreadData);
+          end;
+          csTestLinksLoading: begin
+            prTestLinksLoading(Stream, ThreadData);
+          end;
+          csGetFilterValues: begin
+            prGetFilterValues(Stream, ThreadData);
+          end;
+          csShowActionNews: begin
+            prShowActionNews(Stream, ThreadData);
+          end;
+          csAEActionNews: begin
+            prAEActionNews(Stream, ThreadData);
+          end;
+          csSaveImgForAction: begin
+            prSaveImgForAction(Stream, ThreadData);
+          end;
+          csUnblockWebUser: begin
+            prUnblockWebUser(Stream, ThreadData);
+          end;
+          csDelActionNews: begin
+            prDelActionNews(Stream, ThreadData);
+          end;
+          csShowSysOptionsPage: begin
+            prShowSysOptionsPage(Stream, ThreadData);
+          end;
+          csEditSysOption: begin
+            prEditSysOption(Stream, ThreadData);
+          end;
+          csSaveSysOption: begin
+            prSaveSysOption(Stream, ThreadData);
+          end;
+          csShowConstRoles: begin
+            prShowConstRoles(Stream, ThreadData);
+          end;
+          csEditConstRoles: begin
+            prEditConstRoles(Stream, ThreadData);
+          end;
+          csMarkOneDirectAnalog: begin
+            prMarkOneDirectAnalog(Stream, ThreadData);
+          end;
+          csAddOneDirectAnalog: begin
+            prAddOneDirectAnalog(Stream, ThreadData);
+          end;
+          csShowConditionPortions: begin
+            prShowConditionPortions(Stream, ThreadData);
+          end;
+          csGetWaresByOE: begin
+//            prGetWaresByOE(Stream, ThreadData);
+            prCommonGetWaresByOE(Stream, ThreadData);
+          end;
+          csHideEmptyOE: begin
+             prHideEmptyOE(Stream, ThreadData);
+          end;
+          csMarkPortions: begin
+            prMarkPortions(Stream, ThreadData);
+          end;
+          csShowPortion: begin
+            prShowPortion(Stream, ThreadData);
+          end;
+          csCOUPage: begin
+            prCOUPage(Stream, ThreadData);
+          end;
+          csGetCateroryValues: begin
+            prGetCateroryValues(Stream, ThreadData);
+          end;
+          csSavePortion: begin
+            prSavePortion(Stream, ThreadData);
+          end;
+          csGetSatellites: begin
+            prGetWareSatellites(Stream, ThreadData);
+          end;
+          csGetClientData: begin
+             prWebArmGetFirmInfo(Stream, ThreadData);
+          end;
+          csGetRestsOfWares: begin
+            prCommonGetRestsOfWares(Stream, ThreadData);
+          end;
+          csLoadAccountList: begin
+//            prWebArmGetFirmAccountList(Stream, ThreadData);
+            prWebArmGetFilteredAccountList(Stream, ThreadData);
+          end;
+          csWebArmShowAccount: begin
+            prWebArmShowAccount(Stream, ThreadData);
+          end;
+          csWebArmShowFirmWareRests: begin
+            prWebArmShowFirmWareRests(Stream, ThreadData);
+          end;
+          csWebArmEditAccountHeader: begin
+            prWebArmEditAccountHeader(Stream, ThreadData);
+          end;
+          csWebArmEditAccountLine: begin
+            prWebArmEditAccountLine(Stream, ThreadData);
+          end;
+          csWebArmGetWaresDescrView: begin
+            prWebArmGetWaresDescrView(Stream, ThreadData);
+          end;
+          csWebArmGetDeliviriesList: begin
+             prWebarmGetDeliveries(Stream, ThreadData);
+          end;
+          csCreateSubAcc: begin
+            prWebArmMakeSecondAccount(Stream, ThreadData);
+          end;
+          csGetDeliveriesList: begin
+            prGetDeliveriesList(Stream, ThreadData);
+          end;
+          csRestorePassword: begin
+            prRestorePassword(Stream, ThreadData);
+          end;
+          csBlockWebArmUser: begin
+            prBlockWebArmUser(Stream, ThreadData);
+          end;
+          csWebArmMakeInvoiceFromAccount: begin
+            prWebArmMakeInvoiceFromAccount(Stream, ThreadData);
+          end;
+          csShowTransferInvoices: begin
+            prWebArmGetTransInvoicesList(Stream, ThreadData);
+          end;
+          csShowTransferInvoice: begin
+            prWebArmGetTransInvoice(Stream, ThreadData);
+          end;
+          csWebArmAddWaresFromAccToTransInv: begin
+            prWebArmAddWaresFromAccToTransInv(Stream, ThreadData);
+          end;
+          csCheckRestsInStorageForAcc: begin
+            prCheckRestsInStorageForAcc(Stream, ThreadData);
+          end;
+          csAEDNotification: begin
+            prAEDNotification(Stream, ThreadData);
+          end;
+          csNotificationPage: begin
+            prNotificationPage(Stream, ThreadData);
+          end;
+          csWebArmGetNotificationsParams: begin
+            prWebArmGetNotificationsParams(Stream, ThreadData);
+          end;
+          csShowNotification: begin
+            prShowNotificationOrd(Stream, ThreadData);
+          end;
+          csShowNotificationWA: begin
+            prShowNotification(Stream, ThreadData);
+          end;
+          csWaresByOE: begin
+            prWaresByOE(Stream, ThreadData);
+          end;
+          csCheckContracts: begin
+            prCheckContracts(Stream, ThreadData);
+          end;
+          csWebarmContractList: begin
+            prWebArmContractList(Stream, ThreadData);
+          end;
+          csManageLogotypesPage: begin
+            prManageLogotypesPage(Stream, ThreadData);
+          end;
+          csLogotypeEdit: begin
+            prLogotypeEdit(Stream, ThreadData);
+          end;
+          csLoadOrder: begin
+            prLoadOrder(Stream, ThreadData);
+          end;
+          csLampSelect: begin
+            prGetActionsSrvMng(Stream, ThreadData);
+          end;
+(*
+          cs: begin
+            pr(Stream, ThreadData);
+          end;
+*)
+
+
+          else begin //  case Command of
+            raise EBOBError.Create('Не опознана WebArm-команда - '+IntToStr(Command));
+          end;
+        end; //  case Command of
+      except
+        on E: Exception do begin
+          Stream.Clear;
+          Stream.WriteInt(aeCommonError);
+          if (Command<>csTestLinksLoading) and (AppStatus=stWork) then
+            fnWriteToLog(ThreadData, lgmsSysError, 'TMyClass.ServerWebArmConnect', 'Command='+IntToStr(Command), E.Message, 'ErrorPos='+ErrorPos);
+          Stream.WriteStr('Сервер сообщает об ошибке: '#13#10+E.Message);
+        end;
+      end;
+      if Stream.Size>0 then begin
+        i:=Stream.Size;
+        AThread.Connection.IOHandler.Write(i);              //
+        AThread.Connection.IOHandler.Write(Stream);         // возвращаем ответ на запрос
+      end;
+      AThread.Connection.Disconnect;
+      prFree(Stream);
+    end else begin // если неизвестная сигнатура
+  ErrorPos:='9';
+      AThread.Connection.Disconnect;
+    end; // if i=csWebArm
+
+  except
+    on E: Exception do begin
+      fnWriteToLog(ThreadData, lgmsSysError, 'TMyClass.ServerWebArmConnect', 'Ошибка общего плана', E.Message, 'ErrorPos='+ErrorPos);
+      fnWriteToLog(ThreadData, lgmsInfo, 'TMyClass.ServerWebArmConnect', 'Аварийно завершен поток', E.Message, 'ErrorPos='+ErrorPos);
+    end;
+  end;
+  prDestroyThreadData(ThreadData, 'TMyClass.ServerWebConnect');
+  prFree(Stream);
+  if (AThread<>nil) and AThread.Connection.Connected then AThread.Connection.Disconnect;
+end; //ServerWebArmConnect
+
+procedure TMyClass.ServerManageConnect(AContext: TIdContext);
+var
+  i : integer;
+  ThreadData: TThreadData;
+  Command: word;
+  ErrorPos: string;
+  AThread: TIdContext;
+  Stream: TBOBMemoryStream;
+begin
+ErrorPos:='0';
+  AThread:=AContext;
+  ThreadData:= nil;
+  Stream:=nil;
+try
+  AThread.Connection.IOHandler.ReadTimeout:=5000;
+ErrorPos:='1';
+//  Memo1.Lines.add('Вижу коннект');
+  i:=AThread.Connection.IOHandler.ReadLongInt;    // принимаем сигнатуру
+  AThread.Connection.IOHandler.ReadLongInt;   // пропускаем идентификатор сессии
+ErrorPos:='3';
+//  ThreadData:=fnCreateThread(fnSignatureToThreadType(i));
+  case i of
+    csServerManage: begin // если это запрос управления сервером
+//    sleep(10000);
+ErrorPos:='8';
+      Command:=word(AThread.Connection.IOHandler.ReadSmallInt);   // принимаем команду
+//      prSetThLogParams(ThreadData,Integer(Command),0,0,''); // логирование в ib_css
+      ThreadData:= fnCreateThread(fnSignatureToThreadType(i), Integer(Command));
+
+ErrorPos:='8-3';
+      i:=AThread.Connection.IOHandler.ReadLongInt;                // принимаем размер тела запроса
+ErrorPos:='8-6';
+      Stream :=TBOBMemoryStream.Create;
+ErrorPos:='8-7';
+      AThread.Connection.IOHandler.ReadStream(Stream, i);         // принимаем тело запроса
+ErrorPos:='8-8';
+      try
+        case Command of
+          scGetStatus: begin
+            prGetFullStatus(Stream, ThreadData);
+          end;
+          scSuspend, scResume, scExit: begin
+//            prExecuteServerCommand(Stream, ThreadData, Command, AThread.Connection.IOHandler.Host);
+            prExecuteServerCommand(Stream, ThreadData, Command, AThread.Connection.Socket.Binding.PeerIP);
+          end;
+          scUpdateCache: begin
+            prUpdateCacheSrvMng(Stream, ThreadData);
+          end;
+          scGetActions: begin
+             prGetActionsSrvMng(Stream, ThreadData);
+          end;
+          else begin
+            raise EBOBError.Create('Не опознана управляющая команда - '+IntToStr(Command));
+          end;
+        end;
+      except
+        on E: Exception do begin
+          Stream.Clear;
+          Stream.WriteInt(aeCommonError);
+          fnWriteToLog(ThreadData, lgmsSysError, 'TMyClass.ServerManageConnect', '', E.Message, '');
+          Stream.WriteStr('Сервер сообщает об ошибке: '#13#10+E.Message);
+        end;
+      end;
+ErrorPos:='8-9';
+      If Stream.Size>0 then begin
+        i:=Stream.Size;
+ErrorPos:='8-10: Stream.Size='+IntToStr(i);
+        AThread.Connection.IOHandler.Write(i);              //
+ErrorPos:='8-11: Stream.Size='+IntToStr(i);
+        AThread.Connection.IOHandler.Write(Stream);         // возвращаем ответ на запрос
+ErrorPos:='8-12';
+      end;
+      AThread.Connection.Disconnect;
+      prFree(Stream);
+    end;
+
+    else begin // если неизвестная сигнатура
+ErrorPos:='9';
+      AThread.Connection.Disconnect;
+    end; //end of "else" branch of case
+  end;
+
+  except
+    on E: Exception do begin
+      fnWriteToLog(ThreadData, lgmsSysError, 'TMyClass.ServerManageConnect', 'Ошибка общего плана', E.Message, 'ErrorPos='+ErrorPos);
+      fnWriteToLog(ThreadData, lgmsInfo, 'TMyClass.ServerManageConnect', 'Аварийно завершен поток', E.Message, 'ErrorPos='+ErrorPos);
+    end;
+  end;
+  prFree(Stream);
+  if (AThread<>nil) and AThread.Connection.Connected then AThread.Connection.Disconnect;
+  prDestroyThreadData(ThreadData, 'TMyClass.ServerManageConnect');
+end; //ServerManageConnect
+
+//==========================================================  TMyClass
+
+// Функция для пользовательской сортировки товаров в StringList с учетом бренда
+function fnWareCompareByBrand(List: TStringList; Index1, Index2: Integer): Integer;
+var
+ Ware1, Ware2: TWareInfo;
+begin
+  Ware1:=TWareInfo(Cache.arWareInfo[integer(List.Objects[Index1])]);
+  Ware2:=TWareInfo(Cache.arWareInfo[integer(List.Objects[Index2])]);
+  if (Ware1.WareBrandName<Ware2.WareBrandName) then Result:=-1 else
+  if (Ware1.WareBrandName>Ware2.WareBrandName) then Result:=1 else
+  if (Ware1.Name<Ware2.Name) then Result:=-1 else
+  if (Ware1.Name>Ware2.Name) then Result:=1 else
+  Result:=0;
+
+end;
+
+// Функция получения товаров по заданному бренду
+function fnGetWareListByBrand(Brand: integer; Sys: byte = 255; Sort: boolean = false): TStringList;
+var
+  i: integer;
+  recs: integer;
+begin
+  Result:= TStringList.Create;
+  try
+    if (not Cache.WareBrands.ItemExists(Brand)) then begin
+      raise EBOBError.Create('Не существует бренда с кодом '+IntToStr(Brand));
+    end;
+
+
+    recs:= Length(Cache.arWareInfo)-1;
+    for i:= 0 to recs do begin
+      if (Cache.WareExist(i)) then begin
+        if ((Cache.arWareInfo[i].WareBrandID=Brand) and ((Sys in constAllSys) or Cache.arWareInfo[i].CheckWareTypeSys(Sys))) then begin
+          Result.AddObject(Cache.arWareInfo[i].Name, pointer(Cache.arWareInfo[i].ID));
+        end;
+      end;
+    end;
+    if Sort then begin
+      Result.Sort;
+    end;
+  except
+    on E:Exception do begin
+      raise Exception.Create('fnGetWareListByBrand: '+E.Message);
+    end;
+  end;
+end;
+
+function fnGetAdaptedConstValue(ConstID: integer): string;
+const nmProc = 'fnGetAdaptedConstValue'; // имя процедуры/функции
+var
+  Employee: TEmplInfoItem;
+  aos: Tas;
+  s, ss: string;
+  j, EmplCode, Code: integer;
+  Item: TConstItem;
+begin
+  Result:='';
+  try
+    if not Cache.ConstExists(ConstID) then
+      raise EBOBError.Create(MessText(mtkNotValidParam)+' - код='+IntToStr(ConstID));
+
+    Item:=Cache.GetConstItem(ConstID);
+    case ConstID of
+      pcEmplID_list_Rep30, pcTestingSending1, pcTestingSending2, pcTestingSending3,
+      pcEmpl_list_UnBlock, pcEmpl_list_TmpBlock, pcEmpl_list_FinalBlock, pcVINmailEmpl_list
+      : begin
+        aos:=fnSplitString(Item.StrValue, ',');
+        s:='';
+        for j:=0 to Length(aos)-1 do begin
+          EmplCode:=StrToIntDef(aos[j], 0);
+          ss:='';
+          if EmplCode<0 then begin
+            ss:=ceNames[EmplCode];
+          end else
+          if Cache.EmplExist(EmplCode) then begin
+            Employee:=Cache.arEmplInfo[EmplCode];
+            ss:=fnCutFio(Employee.Surname, Employee.Name, Employee.Patronymic);
+          end;
+
+          if ss<>'' then begin
+            if s<>'' then begin
+              s:=s+', ';
+            end;
+            s:=s+ss;
+          end;
+        end;
+        Result:=s;
+      end; // pcEmplID_list_Rep30
+
+      pcVINmailFilial_list: begin
+        s:='';
+        aos:=fnSplitString(Item.StrValue, ',');
+        for j:=0 to Length(aos)-1 do begin
+          Code:=StrToIntDef(aos[j], 0);
+          if Cache.DprtExist(Code) and Cache.arDprtInfo[Code].IsFilial then begin
+            if s<>'' then begin
+              s:=s+', ';
+            end;
+            s:=s+Cache.arDprtInfo[Code].Name;
+          end;
+        end;
+        Result:=s;
+      end; // pcVINmailFilial_list
+
+      pcVINmailFirmClass_list, pcPriceLoadFirmClasses: begin
+        s:='';
+        aos:=fnSplitString(Item.StrValue, ',');
+        for j:=0 to Length(aos)-1 do begin
+          Code:=StrToIntDef(aos[j], 0);
+          ss:=Cache.GetFirmClassName(Code);
+          if ss<>'' then begin
+            if s<>'' then begin
+              s:=s+', ';
+            end;
+            s:=s+ss;
+          end;
+        end;
+        Result:=s;
+      end; // pcVINmailFirmClass_list, pcPriceLoadFirmClasses
+
+      pcVINmailFirmTypes_list: begin
+        s:='';
+        aos:=fnSplitString(Item.StrValue, ',');
+        for j:=0 to Length(aos)-1 do begin
+          Code:=StrToIntDef(aos[j], -1);
+          ss:=Cache.GetFirmTypeName(Code);
+          if ss<>'' then begin
+            if s<>'' then begin
+              s:=s+', ';
+            end;
+            s:=s+ss;
+          end;
+        end;
+        Result:=s;
+      end; // pcVINmailFirmTypes_list
+
+      pcEmplSaleDirectorAuto, pcEmplSaleDirectorMoto : begin
+        if Cache.EmplExist(StrToInt(Item.StrValue)) then begin
+          Employee:=Cache.arEmplInfo[StrToInt(Item.StrValue)];
+          Result:=(fnCutFio(Employee.Surname, Employee.Name, Employee.Patronymic));
+        end else begin
+          Result:=('Неизвестный');
+        end;
+
+      end; //pcEmplSaleDirectorAuto, pcEmplSaleDirectorAuto
+    else
+      Result:=Item.StrValue;
+    end;
+  except
+    on E: EBOBError do begin
+      raise EBOBError.Create(nmProc+'for constID='+IntToStr(ConstID)+': '+E.Message);
+    end;
+    on E: Exception do begin
+      raise Exception.Create(nmProc+'for constID='+IntToStr(ConstID)+': '+E.Message);
+    end;
+  end;
+  SetLength(aos, 0);
+end;  // fnGetAdaptedConstValue
+
+// используется для сортировки объектов типа TTwoCodes в TObjectList при выводе списка типов товаров в результатах поиска
+function CompareTypeNamesForTwoCodes(Item1, Item2: Pointer): Integer;
+begin
+  if (TTwoCodes(Item1).ID1=TTwoCodes(Item2).ID1) then begin
+    Result:=0;
+  end else
+  if (TTwoCodes(Item1).ID1=0) then begin
+    Result:=1;
+  end else
+  if (TTwoCodes(Item2).ID1=0) then begin
+    Result:=-1;
+  end else
+    Result := CompareText(Cache.GetWareTypeName(TTwoCodes(Item1).ID1), Cache.GetWareTypeName(TTwoCodes(Item2).ID1));
+end;
+
+// используется для сортировки объектов типа TTwoCodes в TObjectList при выводе списка производителей авто/мото
+function CompareManufacturerNamesForTwoCodes(Item1, Item2: Pointer): Integer;
+begin
+  Result := CompareText(Cache.FDCA.Manufacturers[TTwoCodes(Item1).ID1].Name, Cache.FDCA.Manufacturers[TTwoCodes(Item2).ID1].Name);
+end;
+
+// используется для сортировки StringList в TObjectList при выводе порций условий применимости
+function CompareConditionPortions(Item1, Item2: Pointer): Integer;
+begin
+  Result := CompareText(TStringList(Item1).QuoteChar, TStringList(Item2).QuoteChar);
+end;
+
+// проверяет, просрочено ли время доставки
+// true - не просрочен
+function CheckShipmentDateTime(Data: TDate; TimeCode: integer): boolean;
+var
+  Hour, Minute: double;
+begin
+  Result:=not fnNotZero(Data);
+  if not Result then begin
+    if TimeCode=0 then begin
+      Hour:=23;
+      Minute:=59.9999999;
+    end else begin
+      Hour:=TShipTimeItem(Cache.ShipTimes[TimeCode]).Hour;
+      Minute:=TShipTimeItem(Cache.ShipTimes[TimeCode]).Minute;
+    end;
+    Result:=(Data+Hour/24+Minute/60/24)>Now();
+  end;
+end; //CheckShipmentDateTime
+
+
+
+end.

@@ -1,0 +1,294 @@
+unit v_CSSServerManageProcs;
+//############################################################################//
+//## Процедуры, связанные с обработкой запросов, управляющих приложением    ##//
+//############################################################################//
+
+interface
+uses SysUtils, IniFiles, v_DataTrans, v_server_common, v_constants,
+  n_MailServis, n_vlad_init, n_server_common, n_LogThreads,
+  IBDataBase, IBQuery, IBSQL;
+
+
+procedure prGetFullStatus(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+procedure prExecuteServerCommand(Stream: TBoBMemoryStream; ThreadData: TThreadData; ACommand: integer; AIP: string);
+procedure prUpdateCacheSrvMng(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+procedure prGetActionsSrvMng(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+implementation
+
+uses n_CSSThreads, n_DataCacheInMemory, n_IBCntsPool, n_DataSetsManager,
+  n_free_functions;
+
+procedure prGetFullStatus(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+var
+  i, Count: integer;
+  s: string;
+  IniFile: TINIFile;
+  Pools: array of TIBCntsPool;
+begin
+  try
+    IniFile:=TINIFile.Create(nmIniFileBOB);
+    Stream.Position:=0;
+
+    if IniFile.ReadString('Manage', 'ManagePass', 'sdihhhsdohsdohsovhovhsodvhsdohsdohSDObhSDObhsdohsdohbhSbuo')<>Stream.ReadStr then begin
+      raise Exception.Create('Неправильный пароль');
+    end;
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+    Stream.WriteInt(AppStatus);
+    if AppStatus in [stSuspending, stSuspended] then begin  // если приложение спит, то отправляем список усыпивших его серверов
+      s:='';
+      for i:=0 to Length(StopList)-1 do begin
+        s:=StopList[i]+', ';
+      end;
+      Stream.WriteStr(Copy(s, 1, length(s)-2));
+    end;
+
+    Stream.WriteByte(1);
+    Stream.WriteByte(1);
+
+    if ServerWeb=nil then begin
+      Stream.WriteInt(sttcpsrvNone);
+    end else begin
+      if ServerWeb.Active then begin
+        Stream.WriteInt(sttcpsrvActive);
+      end else begin
+        Stream.WriteInt(sttcpsrvSuspended);
+      end;
+    end;
+
+    if ServerWebArm=nil then begin
+      Stream.WriteInt(sttcpsrvNone);
+    end else begin
+      if ServerWebArm.Active then begin
+        Stream.WriteInt(sttcpsrvActive);
+      end else begin
+        Stream.WriteInt(sttcpsrvSuspended);
+      end;
+    end;
+
+    if RespThread=nil then begin
+      Stream.WriteInt(stthrdNone);
+    end else begin
+      Stream.WriteInt(RespThread.Status);
+      Stream.WriteDouble(RespThread.LastTime);
+    end;
+
+    if MailThread=nil then begin
+      Stream.WriteInt(stthrdNone);
+    end else begin
+      Stream.WriteInt(MailThread.Status);
+      Stream.WriteDouble(MailThread.LastTime);
+    end;
+
+    if TestThread=nil then begin
+      Stream.WriteInt(stthrdNone);
+    end else begin
+      Stream.WriteInt(TestThread.Status);
+      Stream.WriteDouble(TestThread.LastTime);
+    end;
+
+    if thCheckStoppedOrders=nil then begin
+      Stream.WriteInt(stthrdNone);
+    end else begin
+      Stream.WriteInt(TCSSCyclicThread(thCheckStoppedOrders).Status);
+      Stream.WriteDouble(TCSSCyclicThread(thCheckStoppedOrders).LastTime);
+    end;
+
+    if thCheckDBConnectThread=nil then begin
+      Stream.WriteInt(stthrdNone);
+    end else begin
+      Stream.WriteInt(TCSSCyclicThread(thCheckDBConnectThread).Status);
+      Stream.WriteDouble(TCSSCyclicThread(thCheckDBConnectThread).LastTime);
+    end;
+    Stream.WriteInt(Cache.GetTestCacheIndication);
+    Stream.WriteDouble(Cache.GetLastTimeCache);
+
+    Count:=4;
+    SetLength(Pools, Count+1);
+    Pools[0]:=cntsGRB;
+    Pools[1]:=cntsORD;
+    Pools[2]:=cntsLOG;
+    Pools[3]:=cntsSUF;
+    Pools[4]:=cntsTDT;
+
+    Stream.WriteInt(Count+1);
+    for i := 0 to Count do begin
+      Stream.WriteStr(Pools[i].CntsComment);
+      Stream.WriteStr(Pools[i].dbPath);
+      Stream.WriteBool(Pools[i].BaseConnected);
+    end;
+
+  except
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsSysError, 'prGetFullStatus', '', E.Message, '');
+    end;
+  end;
+  Stream.Position:=0;
+
+end; // prGetFullStatus
+
+
+procedure prExecuteServerCommand(Stream: TBoBMemoryStream; ThreadData: TThreadData; ACommand: integer; AIP: string);
+var
+  IniFile: TINIFile;
+  s, s1: string;
+begin
+  try
+    IniFile:=TINIFile.Create(nmIniFileBOB);
+    Stream.Position:=0;
+
+    s:=IniFile.ReadString('Manage', 'ManagePass', 'sdihhhsdohsdohsovhovhsodvhsdohsdohSDObhSDObhsdohsdohbhSbuo');
+    s1:=Stream.ReadStr;
+    if s<>s1 then begin
+      raise Exception.Create('Неправильный пароль');
+    end;
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+
+    while ManageCommandsLock do sleep(50);
+    try
+      ManageCommandsLock:=true;
+      if ACommand=scExit then begin
+        SetLength(arManageCommands, 1);
+      end else begin
+        SetLength(arManageCommands, Length(arManageCommands)+1);
+      end;
+      arManageCommands[Length(arManageCommands)-1].Command:=ACommand;
+      arManageCommands[Length(arManageCommands)-1].IP:=AIP;
+    finally
+      ManageCommandsLock:=false;
+    end;
+
+
+  except
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsSysError, 'prExecuteServerCommand', '', E.Message, '');
+    end;
+  end;
+  Stream.Position:=0;
+  prFree(IniFile);
+end; // prExecuteServerCommand
+
+
+procedure prUpdateCacheSrvMng(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prUpdateCacheSrvMng'; // имя процедуры/функции
+var
+  IniFile: TINIFile;
+  s, s1: string;
+begin
+  try
+    IniFile:=TINIFile.Create(nmIniFileBOB);
+    Stream.Position:=0;
+
+    s:=IniFile.ReadString('Manage', 'ManagePass', 'sdihhhsdohsdohsovhovhsodvhsdohsdohSDObhSDObhsdohsdohbhSbuo');
+    s1:=Stream.ReadStr;
+    if s<>s1 then begin
+      raise Exception.Create('Неправильный пароль');
+    end;
+
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+
+    with TCSSCyclicThread(thCheckDBConnectThread) do
+    if ExpressFlag or Cache.WareCacheTested then
+      raise EBoBError.Create('Выполняется '+fnIfStr(ExpressFlag, 'срочная', 'штатная')+' проверка кеша')
+    else ExpressFlag:= True;
+
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:=0;
+  prFree(IniFile);
+end; // prExecuteServerCommandprUpdateCacheSrvMng
+
+
+procedure prGetActionsSrvMng(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+const nmProc = 'prUpdateCacheSrvMng'; // имя процедуры/функции
+var
+  IniFile: TINIFile;
+//  s, s1: string;
+  OrdIBDatabase: TIBDatabase;
+  OrdIBSQL: TIBSQL;
+  Count, Pos: integer;
+begin
+  ORDIBDatabase:=nil;
+  OrdIBSQL:= nil;
+  try
+    IniFile:=TINIFile.Create(nmIniFileBOB);
+    Stream.Position:=0;
+
+(*
+    s:=IniFile.ReadString('Manage', 'ManagePass', 'sdihhhsdohsdohsovhovhsodvhsdohsdohSDObhSDObhsdohsdohbhSbuo');
+    s1:=Stream.ReadStr;
+    if s<>s1 then begin
+      raise Exception.Create('Неправильный пароль');
+    end;
+*)
+    Stream.Clear;
+    Stream.WriteInt(aeSuccess); // знак того, что запрос обработан корректно
+
+    OrdIBDatabase:=CntsOrd.GetFreeCnt();
+    OrdIBSQL:=fnCreateNewIBSQL(OrdIBDatabase,'GBIBSQL_'+nmProc,ThreadData.ID, tpRead, true);
+    OrdIBSQL.SQL.Text:='Select * from infoboxviews where "TODAY" between IBVDATEFROM and IBVDATETO and (IBVVISAUTO="T" or IBVVISMOTO="T") order by IBVPRIORITY desc, IBVDATEFROM desc';
+    OrdIBSQL.ExecQuery;
+
+    Pos:=Stream.Position;
+    Stream.WriteInt(0); // заглушка под кол-во
+    Count:=0;
+    while not OrdIBSQL.EOF do begin
+      Stream.WriteInt(OrdIBSQL.FieldByName('IBVCODE').Asinteger);
+      Stream.WriteBool(OrdIBSQL.FieldByName('IBVVISAUTO').AsString='T');
+      Stream.WriteBool(OrdIBSQL.FieldByName('IBVVISMOTO').AsString='T');
+      Stream.WriteBool(OrdIBSQL.FieldByName('IBVVISIBLE').AsString='T');
+      Stream.WriteInt(OrdIBSQL.FieldByName('IBVPRIORITY').Asinteger);
+      Stream.WriteStr(OrdIBSQL.FieldByName('IBVTITLE').AsString);
+      Stream.WriteStr(OrdIBSQL.FieldByName('IBVLINKTOSITE').AsString);
+      Stream.WriteStr(OrdIBSQL.FieldByName('IBVLINKTOPICT').AsString);
+      inc(Count);
+      OrdIBSQL.Next;
+    end;
+    Stream.Position:=Pos;
+    Stream.WriteInt(Count);
+    Stream.SaveToFile('actions.raw');
+  except
+    on E: EBOBError do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsUserError, nmProc, '', E.Message, '');
+    end;
+    on E: Exception do begin
+      Stream.Clear;
+      Stream.WriteInt(aeCommonError);
+      Stream.WriteStr(E.Message);
+      fnWriteToLog(ThreadData, lgmsSysError, nmProc, '', E.Message, '');
+    end;
+  end;
+  Stream.Position:=0;
+  prFreeIBSQL(OrdIBSQL);
+  cntsORD.SetFreeCnt(OrdIBDatabase);
+  prFree(IniFile);
+end; // prGetActionsSrvMng
+
+
+
+
+end.

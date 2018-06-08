@@ -1,0 +1,74 @@
+unit s_OnlineProceduresOrd;
+
+interface
+uses Classes, System.Types, System.Contnrs, SysUtils, Math, Variants, DateUtils,
+     DB, IBDatabase, IBSQL, IBQuery,
+     n_free_functions, v_constants, v_Functions, v_DataTrans,
+     n_LogThreads, n_DataCacheInMemory, n_constants, n_DataSetsManager, n_server_common,IniFiles;
+
+procedure prGeneralNewSystemProcWebArm(Stream: TBoBMemoryStream; ThreadData: TThreadData);
+function fnHeader(Autenticated: Boolean=true) : string;
+function fnFooter: string;
+
+const
+  StandartErrorMessage        : string = 'Произошла ошибка выполнения. Если эта ошибка происходит регулярно, сообщите об этом по адресу valeriy.chichkov@vladislav.ua';
+  coReloginText               : string = 'Войдите в систему заново введя свои логин и пароль.'; //Ошибка входа.
+  SessionTimeMin              : integer = 30;
+  constPayInvoiceFilterHeader : integer = 165;
+
+type
+ GetPageData=function (Stream: TBoBMemoryStream): string;
+
+
+var
+  Error             : string = '';
+  UserID             : string = '';
+  FirmID             : string = '';
+  IP                 : string = '';
+  UserLogin          : string = '';
+  SessionID          : string = '';
+  UserName           : string = '';
+  Result             : string = '';
+  ServerTime         : TDateTime;        // время сервера
+  Roles              : Tai;              // Роли пользователя
+  ShowImportPage   : boolean=false;    // Есть ли разрешенные типы импорта
+  SysOptions       : boolean=false;    // Есть ли разрешение на управление константами
+  Links23Loaded    : boolean = false;
+  Short            : boolean = false;
+  MustChangePass     : boolean = false;
+  SessionTimeMinStr    : string;
+  TechWork           : string = 'techwork.html';
+  OnReadyScript      : string = '';
+
+  BaseUrl            : string;
+  BaseDir            : string;
+  DescrUrl           : string;
+  DescrImageUrl      : string;
+  TmpDir             : string;
+  DescrDir           : string;
+  iniFileName        : string;
+  globToHeader       : string;
+  JSVersion          : string = 'v2.11.4';
+  ContractId         : longint = 0;
+  NeedCalendar     : boolean = false;  // true, если нужен календарь
+  NeedDropFirmList : boolean = false;  // true, если нужен выпадающий список фирм
+  NeedTinyMCE      : boolean = false;  // true, если нужен редактор TinyMCE
+  GoogleAnalytics     : string='<script type="text/javascript" > '#13#10'  (function(i,s,o,g,r,a,m){i[''GoogleAnalyticsObject'']=r;i[r]=i[r]||function(){'#13#10+
+                               '  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),'#13#10+
+                               '  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)'#13#10+
+                               '  })(window,document,''script'',''//www.google-analytics.com/analytics.js'',''ga'');'#13#10#13#10+
+                               '  ga(''create'', ''UA-41098000-1'', ''vladislav.ua'');'#13#10'  ga(''send'', ''pageview'');'#13#10#13#10'</script>'#13#10;
+
+  ScriptName         : string;
+  PageName           : string;
+  TitleStr           : string;
+  globToScript     : string;
+  strPost,strGet,strCookie,strOther: TStringList;
+  LogText: string;
+
+
+implementation
+uses  s_CommandFunc,n_CSSservice, n_CSSThreads, n_IBCntsPool, n_DataCacheObjects,n_WebArmProcedures,t_function,t_WebArmProcedures,s_Utils,n_OnlinePocedures;
+
+
+end.

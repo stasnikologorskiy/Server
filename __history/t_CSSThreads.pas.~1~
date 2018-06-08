@@ -1,0 +1,783 @@
+unit t_CSSThreads;
+
+interface
+uses Classes, SysUtils, IniFiles, Forms, DateUtils, System.Math, Variants,
+     IdTCPServer, IBDatabase, IBSQL, IdHTTP, IdUri,
+     n_CSSThreads, n_free_functions, n_server_common, v_constants, n_LogThreads, n_DataSetsManager, n_constants,
+     n_DataCacheInMemory,
+     t_function;
+
+type
+  TCheckSMSThread = class(TCSSCyclicThread)
+  protected
+    procedure WorkProc; override;
+  public
+    constructor Create(CreateSuspended: Boolean; AThreadType: integer);
+    procedure DoTerminate; override;
+  end;
+
+procedure prSendSMS(ThreadData: TThreadData);  
+procedure prTestSMS(ThreadData: TThreadData);
+
+implementation
+
+function datCompToDateTime(s: string; descD: string='-'): TDateTime;
+var ss,sdd: string;
+begin
+result:= StrToDateTime(copy(s,pos(' ',s)+1,length(s)));
+s:= StringReplace(s,descD,'.',[rfReplaceAll]); 
+ss:= trim(copy(s,1,pos(' ',s)));
+while True do begin
+  if pos('.',ss)=0 then break;
+  sdd:= fnIfStr(pos('.',sdd)=0,'.','')+copy(ss,1,pos('.',ss)-1)+sdd;
+  ss:= copy(ss,pos('.',ss)+1,length(ss)) ;
+end;
+if (ss<>'') and (sdd<>'') then
+  sdd:= ss+'.'+sdd+' '+copy(s,pos(' ',s)+1,length(s))
+else 
+  sdd:= copy(s,pos(' ',s)+1,length(s));
+result:= StrToDateTime(sdd);
+end;
+//==============================================================================
+procedure prSendSMS(ThreadData: TThreadData); 
+const nmProc='prSendSMS';
+      arState: array [0..8] of string  = (
+      'ACCEPT',        // – сообщение принято системой и поставлено в очередь на формирование рассылки.
+      'XMLERROR',      // – Некорректный XML .
+      'ERRPHONES',     //– Неверно задан номер получателя.
+      'ERRSTARTTIME',  //– не корректное время начала отправки.
+      'ERRENDTIME',    //– не корректное время окончания рассылки.
+      'ERRLIFETIME',   //– не корректное время жизни сообщения.
+      'ERRSPEED',      //– не корректная скорость отправки сообщений.
+      'ERRALFANAME',   //– данное альфанумерическое имя использовать запрещено, либо ошибка .
+      'ERRTEXT');
+      arStateR: array [0..8] of string  = (
+      ' сообщение принято системой и поставлено в очередь на формирование рассылки ',
+      ' Некорректный XML ',
+      ' Неверно задан номер получателя ',
+      ' не корректное время начала отправки ',
+      ' не корректное время окончания рассылки ',
+      ' не корректное время жизни сообщения ',
+      ' не корректная скорость отправки сообщений ',
+      ' данное альфанумерическое имя использовать запрещено, либо ошибка ',
+      ' некорректный текст сообщения ');
+var GBIBSQL, GBIBSQLUp: TIBSQL;
+    IBGRB, IBGRBUp: TIBDatabase;
+    HTTP: TIDHTTP;
+    Stream: TStringStream;
+    SBCODE, SBURGENCY, iGr, i, iState,grCount: integer; 
+    SBMESSAGE, SBPHONE, SendSS, ss: string;
+    flSend: boolean;
+    jsonToSend, jsonToBal, SLGroup, SLDuble, SLBody: TStringList;
+    pIniFile: TINIFile;
+    sstat, campaignID, datComp, code, sRec, rec, Addrs: string;
+    balance, tarif: real;
+begin
+  GBIBSQL:= nil;
+  GBIBSQLUp:= nil;
+  IBGRB:= nil;
+  flSend:= false;
+  SendSS:= '';
+  iGr:= 0;
+  jsonToSend := TStringList.create;
+  jsonToBal := TStringList.create;
+  jsonToBal.Add('<?xml version="1.0" encoding="utf-8"?>');
+  jsonToBal.Add('<request>');
+  jsonToBal.Add('<operation>GETBALANCE</operation>');
+  jsonToBal.Add('</request>');
+  SLGroup:= TStringList.Create;
+  SLDuble:= TStringList.Create;
+  SLBody:= TStringList.Create;
+prMessageLOGS(nmProc+' начало ','error' , false);  
+  try
+    HTTP:= TIDHTTP.Create(nil);
+    HTTP.HandleRedirects := true;
+    HTTP.ReadTimeout := 5000;
+    HTTP.Request.BasicAuthentication:= true; 
+    pIniFile:= TINIFile.Create(nmIniFileBOB);  
+    if pIniFile.ReadString('Proxy', 'Server', '')<>'' then begin
+      HTTP.ProxyParams.ProxyServer:=pIniFile.ReadString('Proxy', 'Server', '');
+      HTTP.ProxyParams.ProxyPort:=pIniFile.ReadInteger('Proxy', 'Port', 8080);
+      HTTP.ProxyParams.ProxyUsername:=pIniFile.ReadString('Proxy', 'login', '');
+      HTTP.ProxyParams.ProxyPassword:=pIniFile.ReadString('Proxy', 'Password', '');
+      HTTP.Request.Username:=pIniFile.ReadString('svitSMS', 'login', '380952306161');//'380952306161';
+      HTTP.Request.Password:=pIniFile.ReadString('svitSMS', 'Password', 'RkbtynGhfd531');//'RkbtynGhfd531';
+    end
+    else exit;
+prMessageLOGS(nmProc+' HTTP ','error' , false);    
+    tarif:= pIniFile.ReadFloat('svitSMS', 'tarif', 0.245);
+    grCount:= pIniFile.ReadInteger('svitSMS', 'grCount', 5);
+    IBGRB:= CntsGRB.GetFreeCnt(cDefGBLogin, cDefPassword, cDefGBrole,True);;
+    IBGRBUp:=CntsGRB.GetFreeCnt(cDefGBLogin, cDefPassword, cDefGBrole);
+    GBIBSQL:= fnCreateNewIBSQL(IBGRB, 'Query_'+nmProc, -1, tpRead, true);
+    GBIBSQLUp:= fnCreateNewIBSQL(IBGRBUp, 'Query_'+nmProc, -1, tpWrite, true);
+    GBIBSQLUp.SQL.Text:='Update SMSBOX set SBSTATE=:pSBSTATE, SBCAMPID=:pSBSENDCode, SBSENDDATE=:pSBSENDDATE, SBERROR=:pSBERROR where SBCODE=:pSBCODE';
+    GBIBSQL.SQL.Text:= 'SELECT SBCODE, SBPHONE, SBMESSAGE, SBURGENCY, SBSTATE, SBERROR '#10
+                     + 'FROM SMSBOX '#10
+                     + 'where SBCAMPID is null and (SBERROR is null or SBERROR="")';
+    GBIBSQL.Prepare; 
+    GBIBSQL.ExecQuery;
+prMessageLOGS(nmProc+' GBIBSQL.ExecQuery ','error' , false);    
+    try
+      while not GBIBSQL.EOF do begin  
+        try
+          SBURGENCY:= GBIBSQL.FieldByName('SBURGENCY').AsInteger;
+          if jsonToSend.Count=0 then begin
+            jsonToSend.Add('<?xml version="1.0" encoding="utf-8"?>');
+            jsonToSend.Add('<request>');
+            jsonToSend.Add('<operation>SENDSMS</operation>');
+            jsonToSend.Add('<message start_time="AUTO" end_time="AUTO" lifetime="24" rate="120" desc="My individual campaign" source="Vladislav" type="individual">');
+          end;
+//1- сообщение должно быть отправлено немедленно, 2 - отправка в будні - 8:00-20:00, у вихідні - 11:00-17:00  
+          if SBURGENCY=1 then flSend:= true;
+          if (SBURGENCY=2) and (
+            ((DayOfWeek(Now)<>1) and (DayOfWeek(Now)<>7) and (HourOf(now)>=8) and (HourOf(Now)<20)) 
+            or (((DayOfWeek(Now)=1) or (DayOfWeek(Now)=7)) and (HourOf(now)>=11) and (HourOf(Now)<17))) then flSend:= true;
+          if flSend then begin
+            SBCODE:= GBIBSQL.FieldByName('SBCODE').AsInteger;
+            SBPHONE:= GBIBSQL.FieldByName('SBPHONE').AsString;
+            SBMESSAGE:= GBIBSQL.FieldByName('SBMESSAGE').AsString;
+                        jsonToSend.Add('<recipient>'+SBPHONE+'</recipient> <body>'+SBMESSAGE+'</body>');
+            if SLGroup.IndexOf(SBPHONE)<0 then
+              SLGroup.AddObject(SBPHONE,Pointer(SBCODE))
+            else SLDuble.AddObject(SBPHONE+';'+SBMESSAGE,Pointer(SBCODE));
+            inc(iGr);
+          end;
+        except
+          on e: exception do  begin
+            prMessageLOGS('Ошибка: '+e.Message,'error' , false);
+            prMessageLOGS('SBCODE= '+IntToStr(SBCODE)+' SBPHONE='+SBPHONE+' SBMESSAGE='+SBMESSAGE,'error' , false);
+          end;
+        end;  
+        if iGr>=grCount then begin
+          jsonToSend.Add('</message></request>');
+          try
+            Stream:=TStringStream.Create(jsonToBal.Text, TEncoding.UTF8);
+            ss:= http.Post(TIdUri.UrlEncode('http://svitsms.com/api/api.php'), Stream);
+            Stream.Clear;
+            balance:= StrToFloatDef(fnCutFromTo(ss, '<balance>', '</balance>',false),0);
+            if balance/tarif<grCount then begin
+              prMessageLOGS(nmProc+ 'Нет средств для отправки такого кол-ва СМС. '+'Баланс: '+ FloatToStr(balance), 'error', true) ;
+              break;
+            end;
+prMessageLOGS(nmProc+' отпр: '+jsonToSend.Text,'error' , false);            
+            Stream:=TStringStream.Create(jsonToSend.Text, TEncoding.UTF8);
+            ss:= http.Post(TIdUri.UrlEncode('http://svitsms.com/api/api.php'), Stream);
+prMessageLOGS(nmProc+' ответ: '+ss,'error' , false);            
+            Stream.Clear;
+(*ss:= '<?xml version="1.0" encoding="utf-8"?>'#$A+
+'<message>'#$A#9+
+'<state code="ACCEPT" campaignID="403826" date="2016-04-18 09:08:57">The campaign has been successfully processed and added to the queue for delivery</state>'#$A#9+
+'<to recipient="380971042365" status="ACCEPTED" />'#$A#9+
+'<to recipient="380953674419" status="ACCEPTED" />'#$A+
+'</message>'#$A; 
+ss:= '<?xml version="1.0" encoding="utf-8"?> '+
+'<message> '+
+'<state code="ERRSTARTTIME" date="2012-01-24 12:48:32">Incorrect start time</state> '+
+'</message>';  *)
+//разобрать ответ записать     //<state
+            sstat:= fnCutFromTo(ss, '<state', '</state>',false);
+            //code="ERRSTARTTIME"
+            code:= fnCutFromTo(sstat, 'code="', '"',false);
+            iState:= fnInStrArray(code,arState);
+              //campaignID="403826"
+            campaignID:= fnCutFromTo(sstat, 'campaignID="', '"',false);
+              //date="2016-04-18 09:08:57"
+            datComp:= fnCutFromTo(sstat, 'date="', '"',false);   
+//            datComp:= StringReplace(datComp,'-','.',[rfReplaceAll]); 
+//            datComp:= copy(datComp,pos(' '),length(datComp))
+//            with GBIBSQLUp.Transaction do if not InTransaction then StartTransaction;         
+            if iState=0 then begin
+              while True do begin
+                sRec:= fnCutFromTo(ss, '<to', '/>',false);
+                if sRec='' then break;
+                rec:= fnCutFromTo(sRec, 'recipient="', '"',false);
+                i:= SLGroup.IndexOf(rec);
+                if i>-1 then SBCODE:= integer(SLGroup.Objects[i]) ;
+                sstat:= fnCutFromTo(sRec, 'status="', '"',false);
+                try
+                  GBIBSQLUp.ParamByName('pSBERROR').AsString:= '';//sstat;
+                  GBIBSQLUp.ParamByName('pSBSENDDATE').AsDateTime:= datCompToDateTime(datComp);
+                  GBIBSQLUp.ParamByName('pSBSTATE').AsInteger:= -1;
+                  GBIBSQLUp.ParamByName('pSBSENDCode').AsString:= campaignID;/////////////////////////////
+                  GBIBSQLUp.ParamByName('pSBCODE').AsInteger:= SBCODE; 
+                  with GBIBSQLUp.Transaction do if not InTransaction then StartTransaction;             
+                  GBIBSQLUp.ExecQuery;
+                  GBIBSQLUp.Transaction.Commit;
+                  GBIBSQLUp.Close;
+                except
+                  on E: Exception do begin
+                    GBIBSQLUp.Transaction.Rollback;
+                    prMessageLOGS('Ошибка обновления базы '+nmProc+' '+ E.Message, 'error', true) ;
+                    prMessageLOGS('Phone='+rec+'; campaignID='+campaignID+'date='+datComp, 'error', true) ;
+                  end;
+                end;
+              end;
+            end
+            else begin
+              prMessageLOGS('Ошибка отправки пакета СМС (т.н.: '+SLGroup.Text+'):'+arStateR[i],'error' , true);
+              SLBody.Add('Ошибка отправки пакета СМС: ');
+              for i:=0 to SLGroup.Count-1 do
+              try
+                SLBody.Add(SLGroup[i]);
+                SBCODE:= integer(SLGroup.Objects[i]);
+                GBIBSQLUp.ParamByName('pSBERROR').AsString:= arStateR[iState];
+                GBIBSQLUp.ParamByName('pSBSENDDATE').AsDateTime:= datCompToDateTime(datComp);;
+                GBIBSQLUp.ParamByName('pSBSTATE').AsInteger:= -1;
+                GBIBSQLUp.ParamByName('pSBSENDCode').AsString:= '';/////////////////////////////
+                GBIBSQLUp.ParamByName('pSBCODE').AsInteger:= SBCODE; 
+                with GBIBSQLUp.Transaction do if not InTransaction then StartTransaction;             
+                GBIBSQLUp.ExecQuery;
+                GBIBSQLUp.Transaction.Commit;
+                GBIBSQLUp.Close;
+              except
+                on E: Exception do begin
+                  GBIBSQLUp.Transaction.Rollback;
+                  prMessageLOGS('Ошибка обновления базы '+nmProc+' '+ E.Message, 'error', true) ;
+                  prMessageLOGS('Phone='+rec+'; '+'date='+datComp, 'error', true) ;
+                end;
+              end;
+            end;
+          except
+            on E: Exception do 
+              prMessageLOGS('Ошибка при отправке пакета СМС. Пакет не отправлен. '+nmProc+' '+ E.Message, 'error', true) ;
+          end;
+          jsonToSend.Clear;
+          SLGroup.Clear;
+          iGr:= 0;
+        end;
+        SBURGENCY:= 0;
+        SBCODE:= 0;
+        SBPHONE:= '';
+        SBMESSAGE:= '';
+        flSend:= false;   
+        TestCssStopException;        
+        GBIBSQL.Next;
+      end;
+      if (iGr>0) and (iGr<grCount)  then begin
+        Stream:=TStringStream.Create(jsonToBal.Text, TEncoding.UTF8);
+        ss:= http.Post(TIdUri.UrlEncode('http://svitsms.com/api/api.php'), Stream);
+        Stream.Clear;
+        ss:= fnCutFromTo(ss, '<balance>', '</balance>',false);
+        DecimalSeparator:='.';
+        balance:= StrToFloatDef(ss,0);
+            
+      if (balance/tarif>=iGr) then begin
+        jsonToSend.Add('</message></request>');
+        try
+prMessageLOGS(nmProc+' отпр: '+jsonToSend.Text,'error' , false);            
+          Stream:=TStringStream.Create(jsonToSend.Text, TEncoding.UTF8);
+          ss:= http.Post(TIdUri.UrlEncode('http://svitsms.com/api/api.php'), Stream);
+prMessageLOGS(nmProc+' ответ: '+ss,'error' , false);
+          Stream.Clear;
+(*ss:= '<?xml version="1.0" encoding="utf-8"?>'#$A+
+'<message>'#$A#9+
+'<state code="ACCEPT" campaignID="390136" date="2016-04-07 17:01:57">The campaign has been successfully processed and added to the queue for delivery</state>'#$A#9+
+'<to recipient="380971042365" status="ACCEPTED" />'#$A#9+
+'<to recipient="380953674419" status="ACCEPTED" />'#$A+
+'</message>'#$A;    
+ss:= '<?xml version="1.0" encoding="utf-8"?> '+
+'<message> '+
+'<state code="ERRSTARTTIME" date="2012-01-24 12:48:32">Incorrect start time</state> '+
+'</message>';  *)    
+//разобрать ответ записать     //<state
+          sstat:= fnCutFromTo(ss, '<state', '</state>',false);
+            //code="ERRSTARTTIME"
+          code:= fnCutFromTo(sstat, 'code="', '"',false);
+              //campaignID="403826"
+          campaignID:= fnCutFromTo(sstat, 'campaignID="', '"',false);
+              //date="2016-04-18 09:08:57"
+          datComp:= fnCutFromTo(sstat, 'date="', '"',false);       
+//          datComp:= StringReplace(datComp,'-','.',[rfReplaceAll]);    
+          i:= fnInStrArray(code,arState);
+//          with GBIBSQLUp.Transaction do if not InTransaction then StartTransaction; 
+          if i=0 then begin
+            while True do begin
+              sRec:= fnCutFromTo(ss, '<to', '/>',true);
+              if sRec='' then break;
+              rec:= fnCutFromTo(sRec, 'recipient="', '"',false);
+              i:= SLGroup.IndexOf(rec);
+              if i>-1 then SBCODE:= integer(SLGroup.Objects[i]) ;
+              sstat:= fnCutFromTo(sRec, 'status="', '"',false);
+              try
+                GBIBSQLUp.ParamByName('pSBERROR').AsString:= '';//sstat;
+                GBIBSQLUp.ParamByName('pSBSENDDATE').AsDateTime:= datCompToDateTime(datComp);//StrToDateTime(datComp);
+                GBIBSQLUp.ParamByName('pSBSTATE').AsInteger:= -1;
+                GBIBSQLUp.ParamByName('pSBSENDCode').AsString:= campaignID;/////////////////////////////
+                GBIBSQLUp.ParamByName('pSBCODE').AsInteger:= SBCODE;     
+                with GBIBSQLUp.Transaction do if not InTransaction then StartTransaction;                      
+                GBIBSQLUp.ExecQuery;
+                GBIBSQLUp.Transaction.Commit;
+                GBIBSQLUp.Close;
+              except
+                on E: Exception do begin
+                  GBIBSQLUp.Transaction.Rollback;
+                  prMessageLOGS('Ошибка обновления базы '+nmProc+' '+ E.Message, 'error', true) ;
+                  prMessageLOGS('Phone='+rec+'; campaignID='+campaignID+'date='+datComp, 'error', true) ;
+                end;
+              end;
+            end;
+          end
+          else begin
+            prMessageLOGS('Ошибка отправки пакета СМС (т.н.: '+SLGroup.Text+'):'+arStateR[i],'error' , true);
+            SLBody.Add('Ошибка отправки пакета СМС: ');
+            for i:=0 to SLGroup.Count-1 do
+              try
+                SLBody.Add(SLGroup[i]);
+                SBCODE:= integer(SLGroup.Objects[i]);
+                GBIBSQLUp.ParamByName('pSBERROR').AsString:= arStateR[fnInStrArray(code,arState)];
+                GBIBSQLUp.ParamByName('pSBSENDDATE').AsDateTime:= datCompToDateTime(datComp);//StrToDateTime(datComp);
+                GBIBSQLUp.ParamByName('pSBSTATE').AsInteger:= -1;
+                GBIBSQLUp.ParamByName('pSBSENDCode').AsString:= '';/////////////////////////////
+                GBIBSQLUp.ParamByName('pSBCODE').AsInteger:= SBCODE; 
+                with GBIBSQLUp.Transaction do if not InTransaction then StartTransaction;             
+                GBIBSQLUp.ExecQuery;
+                GBIBSQLUp.Transaction.Commit;
+                GBIBSQLUp.Close;
+              except
+                on E: Exception do begin
+                  GBIBSQLUp.Transaction.Rollback;
+                  prMessageLOGS('Ошибка обновления базы '+nmProc+' '+ E.Message, 'error', true) ;
+                  prMessageLOGS('Phone='+rec+'; '+'date='+datComp, 'error', true) ;
+                end;
+              end;
+          end;
+        except
+          on E: Exception do 
+            prMessageLOGS('Ошибка при отправке пакета СМС. Пакет не отправлен. '+nmProc+' '+ E.Message, 'error', true) ;
+        end;
+        SLGroup.Clear;
+        iGr:= 0;
+      end;
+      end;
+      if SLDuble.Count>0 then begin
+        for i:= 0 to SLDuble.Count-1 do begin
+          TestCssStopException; 
+          Stream:=TStringStream.Create(jsonToBal.Text, TEncoding.UTF8);
+          ss:= http.Post(TIdUri.UrlEncode('http://svitsms.com/api/api.php'), Stream);
+          Stream.Clear;
+          ss:= fnCutFromTo(ss, '<balance>', '</balance>',false);
+          DecimalSeparator:='.';
+          balance:= StrToFloatDef(ss,0);
+          if (balance/tarif>=1) then begin
+            jsonToSend.Clear;
+            SBCODE:= integer(SLDuble.Objects[i]);
+            iGr:= pos(';',SLDuble[i]);
+            SBPHONE:= copy(SLDuble[i],1,iGr-1);
+            SBMESSAGE:= copy(SLDuble[i],iGr+1, length(SLDuble[i]));;
+            jsonToSend.Add('<?xml version="1.0" encoding="utf-8"?>');
+            jsonToSend.Add('<request>');
+            jsonToSend.Add('<operation>SENDSMS</operation>');
+            jsonToSend.Add('<message start_time="AUTO" end_time="AUTO" lifetime="24" rate="120" desc="My campaign " source="Vladislav">');
+            jsonToSend.Add('<body>'+SBMESSAGE+'</body>');
+            jsonToSend.Add('<recipient>'+SBPHONE+'</recipient>');
+            jsonToSend.Add('</message>');
+            jsonToSend.Add('</request>');
+prMessageLOGS(nmProc+' отпр: '+jsonToSend.Text,'error' , false);            
+            Stream:=TStringStream.Create(jsonToSend.Text, TEncoding.UTF8);
+            ss:= http.Post(TIdUri.UrlEncode('http://svitsms.com/api/api.php'), Stream);
+prMessageLOGS(nmProc+' ответ: '+ss,'error' , false);
+            Stream.Clear;
+            sstat:= fnCutFromTo(ss, '<state', '</state>',false);
+            //code="ERRSTARTTIME"
+            code:= fnCutFromTo(sstat, 'code="', '"',false);
+            datComp:= fnCutFromTo(sstat, 'date="', '"',false);
+//            datComp:= StringReplace(datComp,'-','.',[rfReplaceAll]); 
+            campaignID:= fnCutFromTo(sstat, 'campaignID="', '"',false);            
+            iState:= fnInStrArray(code,arState);
+//            with GBIBSQLUp.Transaction do if not InTransaction then StartTransaction; 
+            if iState=0 then begin
+              while True do begin
+                sRec:= fnCutFromTo(ss, '<to', '/>',true);
+                if sRec='' then break;
+                rec:= fnCutFromTo(sRec, 'recipient="', '"',false);
+                sstat:= fnCutFromTo(sRec, 'status="', '"',false);
+                try
+                  GBIBSQLUp.ParamByName('pSBERROR').AsString:= '';
+                  GBIBSQLUp.ParamByName('pSBSENDDATE').AsDateTime:= datCompToDateTime(datComp);//StrToDateTime(datComp);
+                  GBIBSQLUp.ParamByName('pSBSTATE').AsInteger:= -1;
+                  GBIBSQLUp.ParamByName('pSBSENDCode').AsString:= campaignID;/////////////////////////////
+                  GBIBSQLUp.ParamByName('pSBCODE').AsInteger:= SBCODE;     
+                  with GBIBSQLUp.Transaction do if not InTransaction then StartTransaction;                      
+                  GBIBSQLUp.ExecQuery;
+                  GBIBSQLUp.Transaction.Commit;
+                  GBIBSQLUp.Close;
+                except
+                  on E: Exception do begin
+                    GBIBSQLUp.Transaction.Rollback;
+                    prMessageLOGS('Ошибка обновления базы '+nmProc+' '+ E.Message, 'error', true) ;
+                    prMessageLOGS('Phone='+rec+'; campaignID='+campaignID+'date='+datComp, 'error', true) ;
+                  end;
+                end;
+              end;
+            end
+            else begin   //eror
+              try
+                SLBody.Add('Ошибка отправки СМС: '+SBPHONE);
+                GBIBSQLUp.ParamByName('pSBERROR').AsString:= arState[iState];
+                GBIBSQLUp.ParamByName('pSBSENDDATE').AsDateTime:= datCompToDateTime(datComp);//StrToDateTime(datComp);
+                GBIBSQLUp.ParamByName('pSBSTATE').AsInteger:= -1;
+                GBIBSQLUp.ParamByName('pSBSENDCode').AsString:= '';/////////////////////////////
+                GBIBSQLUp.ParamByName('pSBCODE').AsInteger:= SBCODE;     
+                with GBIBSQLUp.Transaction do if not InTransaction then StartTransaction;                      
+                GBIBSQLUp.ExecQuery;
+                GBIBSQLUp.Transaction.Commit;
+                GBIBSQLUp.Close;
+              except
+                  on E: Exception do begin
+                    GBIBSQLUp.Transaction.Rollback;
+                    prMessageLOGS('Ошибка обновления базы '+nmProc+' '+ E.Message, 'error', true) ;
+                    prMessageLOGS('Phone='+rec+'; campaignID='+campaignID+'date='+datComp, 'error', true) ;
+                  end;
+              end;
+              SLBody.Add('Ошибка при отправке СМС на '+SBPHONE +': '+arState[iState]);
+            end;
+          end;
+        end;
+      end;
+    except
+      on e: exception do  begin
+        prMessageLOGS('Ошибка при обработке результатов запроса: '+e.Message,'error' , false);
+      end;
+    end;
+  finally
+prMessageLOGS(nmProc+' finally ','error' , false);  
+    if SLBody.Count>0 then begin
+      Addrs:= pIniFile.ReadString('svitSMS', 'Mails', '');
+      ss:= n_SysMailSend(Addrs, 'SMS Error', SLBody, nil, cNoReplayEmail, '', true);
+      prMessageLOGS(nmProc+' Ошибка при отправке email: '+ss,'error' , true);
+    end;
+    prFreeIBSQL(GBIBSQL);
+    prFreeIBSQL(GBIBSQLUp);
+    if assigned(IBGRB) then cntsGRB.SetFreeCnt(IBGRB, True);
+    if assigned(IBGRBUp) then cntsGRB.SetFreeCnt(IBGRBUp, True);
+    prFree(SLGroup);
+    prFree(SLBody);
+    prFree(SLDuble);
+    prFree(jsonToBal);
+    prFree(jsonToSend);
+    prFree(HTTP);
+    prFree(pIniFile);
+    Stream.Free;
+prMessageLOGS(nmProc+' finally end','error' , false);    
+  end;
+end;
+
+procedure prTestSMS(ThreadData: TThreadData); 
+const nmProc='prTestSMS';
+      arState: array [0..10] of string  = (
+      'PENDING',// - запланировано;
+      'SENT',// - передано мобильному оператору;
+      'DELIVERED',// - доставлено;
+      'EXPIRED',// - истек срок доставки;
+      'UNDELIV',// - не доставлено;
+      'STOPED',// - остановлено системой (недостаточно средств);
+      'ERROR',// - ошибка при отправке;
+      'USERSTOPED',// - остановлено пользователем;
+      'ALFANAMELIMITED',// - ограничено альфаименем;
+      'STOPFLAG',
+      'NEW'// – временные статусы;
+      );
+      arStateR: array [0..10] of string  = (
+      'запланировано',
+      'передано мобильному оператору',
+      'доставлено',
+      'истек срок доставки',
+      'не доставлено',
+      'остановлено системой (недостаточно средств)',
+      'ошибка при отправке',
+      'остановлено пользователем',
+      'ограничено альфаименем',
+      'временные статус',
+      'временные статус');
+var GBIBSQL, GBIBSQLUp: TIBSQL;
+    IBGRB, IBGRBUp: TIBDatabase;
+    HTTP: TIDHTTP;
+    Stream: TStringStream;
+    SBCODE, SBCAMPID, iGr, i, grCount: integer; 
+    SBMESSAGE, SBPHONE, SendSS, ss: string;
+    flSend: boolean;
+    jsonToSend, jsonToBal, SLGroup, SLBody: TStringList;
+    pIniFile: TINIFile;
+    sstat, campaignID, datComp, code, status, rec, Addrs: string;
+    balance, tarif: real;
+begin
+  GBIBSQL:= nil;
+  GBIBSQLUp:= nil;
+  IBGRB:= nil;
+  flSend:= false;
+  SendSS:= '';
+  iGr:= 0;
+  SBCAMPID:= 0;
+  jsonToSend := TStringList.create;
+  SLGroup:= TStringList.create;
+  SLBody:= TStringList.create;
+prMessageLOGS(nmProc+' начало ','error' , false);  
+  try
+    HTTP:= TIDHTTP.Create(nil);
+    HTTP.HandleRedirects := true;
+    HTTP.ReadTimeout := 5000;
+    HTTP.Request.BasicAuthentication:= true; 
+    pIniFile:= TINIFile.Create(nmIniFileBOB);  
+    if pIniFile.ReadString('Proxy', 'Server', '')<>'' then begin
+      HTTP.ProxyParams.ProxyServer:=pIniFile.ReadString('Proxy', 'Server', '');
+      HTTP.ProxyParams.ProxyPort:=pIniFile.ReadInteger('Proxy', 'Port', 8080);
+      HTTP.ProxyParams.ProxyUsername:=pIniFile.ReadString('Proxy', 'login', '');
+      HTTP.ProxyParams.ProxyPassword:=pIniFile.ReadString('Proxy', 'Password', '');
+      HTTP.Request.Username:=pIniFile.ReadString('svitSMS', 'login', '380952306161');//'380952306161';
+      HTTP.Request.Password:=pIniFile.ReadString('svitSMS', 'Password', 'RkbtynGhfd531');//'RkbtynGhfd531';
+    end
+    else exit;
+prMessageLOGS(nmProc+' HTTP ','error' , false);
+    IBGRB:= CntsGRB.GetFreeCnt(cDefGBLogin, cDefPassword, cDefGBrole,True);;
+    IBGRBUp:=CntsGRB.GetFreeCnt(cDefGBLogin, cDefPassword, cDefGBrole);
+    GBIBSQL:= fnCreateNewIBSQL(IBGRB, 'Query_'+nmProc, -1, tpRead, true);
+    GBIBSQLUp:= fnCreateNewIBSQL(IBGRBUp, 'Query_'+nmProc, -1, tpWrite, true);
+    GBIBSQLUp.SQL.Text:='Update SMSBOX set SBSTATE=:pSBSTATE, SBSENDDATE=:pSBSENDDATE, SBERROR=:pSBERROR where SBCODE=:pSBCODE';
+    GBIBSQL.SQL.Text:='SELECT SBCODE, SBCAMPID, SBPHONE, SBSTATE, SBERROR '#10
+                     + 'FROM SMSBOX '#10
+                     + 'where SBCAMPID>0 and (SBERROR is null or SBERROR="") order by SBCAMPID';
+    GBIBSQL.Prepare; 
+    GBIBSQL.ExecQuery;
+prMessageLOGS(nmProc+' GBIBSQL.ExecQuery ','error' , false);    
+    try
+      while not GBIBSQL.EOF do begin    
+        if (SBCAMPID<>GBIBSQL.FieldByName('SBCAMPID').AsInteger) and (SLGroup.Count>0) then begin
+          if SLGroup.Count>1 then begin
+            jsonToSend.Add('<?xml version="1.0" encoding="utf-8"?>');
+            jsonToSend.Add('<request>');
+            jsonToSend.Add('<operation>GETCAMPAIGNDETAIL</operation>');
+            jsonToSend.Add('<message campaignID="'+IntToStr(SBCAMPID)+'" />');
+            jsonToSend.Add('</request>');
+          end;
+          if SLGroup.Count=1 then begin
+            jsonToSend.Add('<?xml version="1.0" encoding="utf-8"?>');
+            jsonToSend.Add('<request>');
+            jsonToSend.Add('<operation>GETMESSAGESTATUS</operation>');
+            jsonToSend.Add('<message campaignID="'+IntToStr(SBCAMPID)+'" recipient="'+SBPHONE+'" />');
+            jsonToSend.Add('</request>');
+          end;
+prMessageLOGS(nmProc+' отпр: '+jsonToSend.Text,'error' , false);            
+          Stream:=TStringStream.Create(jsonToSend.Text, TEncoding.UTF8);
+          ss:= http.Post(TIdUri.UrlEncode('http://svitsms.com/api/api.php'), Stream);
+prMessageLOGS(nmProc+' ответ: '+ss,'error' , false);
+          Stream.Clear;
+          while True do begin
+            sstat:= fnCutFromTo(ss, '<message', '</message>',true);
+            if sstat='' then break;
+            if pos('recipient="',sstat)>0 then
+              SBPHONE:= fnCutFromTo(sstat, 'recipient="', '"',false)
+            else
+              SBPHONE:= fnCutFromTo(sstat, 'phone="', '"',false);
+            status:= fnCutFromTo(sstat, 'status="', '"',false);
+            if pos('date="',sstat)>0 then
+              datComp:= fnCutFromTo(sstat, 'date="', '"',false)
+            else
+              datComp:= fnCutFromTo(sstat, 'modifyDateTime="', '"',false);
+//            datComp:= fnCutFromTo(sstat, fnIfStr(SLGroup.Count=1,'date="','modifyDateTime="'), '"',false);
+            if datComp='' then
+              datComp:= fnCutFromTo(sstat, 'startDateTime="', '"',false);
+//            datComp:= StringReplace(datComp,'-','.',[rfReplaceAll]); 
+            i:= SLGroup.IndexOf(SBPHONE);
+            if i>-1 then
+            try
+              SBCODE:= integer(SLGroup.Objects[i]);
+//              with GBIBSQLUp.Transaction do if not InTransaction then StartTransaction; 
+//              GBIBSQLUp.ParamByName('pSBSENDDATE').AsString:= datComp;
+              GBIBSQLUp.ParamByName('pSBSENDDATE').AsDateTime:= datCompToDateTime(datComp);
+              i:= fnInStrArray(status,arState);
+              if i<9{status='DELIVERED'} then begin
+                GBIBSQLUp.ParamByName('pSBSTATE').AsInteger:= i;
+                if i>=2 then begin 
+                  GBIBSQLUp.ParamByName('pSBERROR').AsString:= arStateR[i];
+                  if i>2 then SLBody.Add('Error of SMS! Phone '+SBPHONE+': '+arStateR[i]);                  
+                end
+                else GBIBSQLUp.ParamByName('pSBERROR').AsString:='';
+              end
+              else if i>8 then begin
+                GBIBSQLUp.ParamByName('pSBSTATE').AsInteger:= -1;
+                GBIBSQLUp.ParamByName('pSBERROR').AsString:= '';//arStateR[i];
+              end;
+//              GBIBSQLUp.ParamByName('pSBSENDCode').AsString:= campaignID;
+              GBIBSQLUp.ParamByName('pSBCODE').AsInteger:= SBCODE;  
+              with GBIBSQLUp.Transaction do if not InTransaction then StartTransaction;                         
+              GBIBSQLUp.ExecQuery;
+              GBIBSQLUp.Transaction.Commit;
+              GBIBSQLUp.Close;
+            except
+              on E: Exception do begin
+                GBIBSQLUp.Transaction.Rollback;
+                prMessageLOGS('Ошибка обновления базы '+nmProc+' '+ E.Message, 'error', true) ;
+                prMessageLOGS('Phone='+rec+'; campaignID='+campaignID+'date='+datComp, 'error', true) ;
+              end;
+            end;
+            if i>2 then  SLBody.Add('Error of SMS! Phone '+SBPHONE+': '+arStateR[i]);
+          end;
+          SLGroup.Clear;
+          jsonToSend.Clear;
+        end;
+        SBCAMPID:= GBIBSQL.FieldByName('SBCAMPID').AsInteger;
+        SBCODE:= GBIBSQL.FieldByName('SBCODE').AsInteger;
+        SBPHONE:= GBIBSQL.FieldByName('SBPHONE').AsString;
+        SLGroup.AddObject(SBPHONE,Pointer(SBCODE));
+        TestCssStopException; 
+        GBIBSQL.Next;
+      end;
+prMessageLOGS(nmProc+' GBIBSQL.ExecQuery 1','error' , false);        
+      if (SLGroup.Count>0) then begin
+        if SLGroup.Count>1 then begin
+          jsonToSend.Add('<?xml version="1.0" encoding="utf-8"?>');
+          jsonToSend.Add('<request>');
+          jsonToSend.Add('<operation>GETCAMPAIGNDETAIL</operation>');
+          jsonToSend.Add('<message campaignID="'+IntToStr(SBCAMPID)+'" />');
+          jsonToSend.Add('</request>');
+        end;
+        if SLGroup.Count=1 then begin
+          jsonToSend.Add('<?xml version="1.0" encoding="utf-8"?>');
+          jsonToSend.Add('<request>');
+          jsonToSend.Add('<operation>GETMESSAGESTATUS</operation>');
+          jsonToSend.Add('<message campaignID="'+IntToStr(SBCAMPID)+'" recipient="'+SBPHONE+'" />');
+          jsonToSend.Add('</request>');
+        end;
+prMessageLOGS(nmProc+' отпр: '+jsonToSend.Text,'error' , false);            
+          Stream:=TStringStream.Create(jsonToSend.Text, TEncoding.UTF8);
+          ss:= http.Post(TIdUri.UrlEncode('http://svitsms.com/api/api.php'), Stream);
+prMessageLOGS(nmProc+' ответ: '+ss,'error' , false);
+          Stream.Clear;
+          while True do begin
+            sstat:= fnCutFromTo(ss, '<message', '</message>',true);
+            if sstat='' then break;
+            if pos('recipient="',sstat)>0 then
+              SBPHONE:= fnCutFromTo(sstat, 'recipient="', '"',false)
+            else
+              SBPHONE:= fnCutFromTo(sstat, 'phone="', '"',false);
+            status:= fnCutFromTo(sstat, 'status="', '"',false);
+            if pos('date="',sstat)>0 then
+              datComp:= fnCutFromTo(sstat, 'date="', '"',false)
+            else
+              datComp:= fnCutFromTo(sstat, 'modifyDateTime="', '"',false);
+//            datComp:= fnCutFromTo(sstat, fnIfStr(SLGroup.Count=1,'date="','modifyDateTime="'), '"',false);
+            if datComp='' then
+              datComp:= fnCutFromTo(sstat, 'startDateTime="', '"',false);
+//            datComp:= StringReplace(datComp,'-','.',[rfReplaceAll]); 
+            i:= SLGroup.IndexOf(SBPHONE);
+            if i>-1 then
+            try
+              SBCODE:= integer(SLGroup.Objects[i]);
+//              with GBIBSQLUp.Transaction do if not InTransaction then StartTransaction; 
+//              GBIBSQLUp.ParamByName('pSBSENDDATE').AsString:= datComp;
+              GBIBSQLUp.ParamByName('pSBSENDDATE').AsDateTime:= datCompToDateTime(datComp);
+              i:= fnInStrArray(status,arState);
+              if i<9{status='DELIVERED'} then begin
+                GBIBSQLUp.ParamByName('pSBSTATE').AsInteger:= i;
+                if i>=2 then begin 
+                  GBIBSQLUp.ParamByName('pSBERROR').AsString:= arStateR[i];
+                  if i>2 then SLBody.Add('Error of SMS! Phone '+SBPHONE+': '+arStateR[i]);                  
+                end
+                else GBIBSQLUp.ParamByName('pSBERROR').AsString:='';
+              end
+              else if i>8 then begin
+                GBIBSQLUp.ParamByName('pSBSTATE').AsInteger:= -1;
+                GBIBSQLUp.ParamByName('pSBERROR').AsString:= '';//arStateR[i];
+              end;
+//              GBIBSQLUp.ParamByName('pSBSENDCode').AsString:= campaignID;
+              with GBIBSQLUp.Transaction do if not InTransaction then StartTransaction;             
+              GBIBSQLUp.ParamByName('pSBCODE').AsInteger:= SBCODE;              
+              GBIBSQLUp.ExecQuery;
+              GBIBSQLUp.Transaction.Commit;
+              GBIBSQLUp.Close;
+            except
+              on E: Exception do begin
+                GBIBSQLUp.Transaction.Rollback;
+                prMessageLOGS('Ошибка обновления базы '+nmProc+' '+ E.Message, 'error', true) ;
+                prMessageLOGS('Phone='+rec+'; campaignID='+campaignID+'; date='+datComp, 'error', true) ;
+              end;
+            end;
+//            if i>2 then  SLBody.Add('Error of SMS! Phone '+SBPHONE+': '+arStateR[i]);
+          end;
+          SLGroup.Clear;
+        end;
+    except
+      on e: exception do  begin
+        prMessageLOGS(nmProc+' Ошибка при обработке результатов запроса: '+e.Message,'error' , true);
+      end;
+    end;
+  finally
+prMessageLOGS(nmProc+' finally ','error' , false);    
+    if SLBody.Count>0 then begin
+      Addrs:= pIniFile.ReadString('svitSMS', 'Mails', '');
+      ss:= n_SysMailSend(Addrs, 'SMS Error', SLBody, nil, cNoReplayEmail, '', true);
+      prMessageLOGS(nmProc+' Ошибка при отправке email: '+ss,'error' , true);
+    end;
+    prFreeIBSQL(GBIBSQL);
+    prFreeIBSQL(GBIBSQLUp);
+    if assigned(IBGRB) then cntsGRB.SetFreeCnt(IBGRB, True);
+    if assigned(IBGRBUp) then cntsGRB.SetFreeCnt(IBGRBUp, True);
+    prFree(jsonToSend);
+    prFree(SLGroup);
+    prFree(SLBody);
+    prFree(HTTP);
+    prFree(pIniFile);
+    prFree(Stream);
+  end;
+end;
+//******************************************************************************
+//                           TCheckSMSThread
+//******************************************************************************
+procedure TCheckSMSThread.WorkProc;
+const nmProc = 'TCheckSMSThread_WorkProc'; // имя процедуры/функции/потока
+var fOpen: boolean;
+    rIniFile: TINIFile;
+    
+  procedure prSleep;
+  var i: Integer;
+  begin
+    for i:= 1 to 3 do begin
+      Application.ProcessMessages; // без этого нельзя завершить процесс
+      TestCssStopException;
+      sleep(331);
+    end;
+  end;    
+begin
+  rIniFile:= TINIFile.Create(nmIniFileBOB);
+  try try
+    CycleInterval:= rIniFile.ReadInteger('intervals', 'CheckSMSInterval', 30)*60;     //min to sec
+if not Cache.WareLinksUnLocked then exit; // ждем готовности связок    
+    fOpen:= (appStatus in [stWork]) and (cntsGRB.BaseConnected) ;   
+    if fOpen then  prSendSMS(ThreadData);
+prMessageLOGS(nmProc+' prTestSMS начало ','error' , false);     
+    if fOpen then  prTestSMS(ThreadData);    
+
+  except
+    on E:Exception do begin
+      prMessageLOG(nmProc+' - внутренний охватывающий try '+E.Message);
+(*      try
+//        prMessageLOG('FSafeSuspendFlag='+BOBBoolToStr(FSafeSuspendFlag));
+//        prMessageLOG('FStopFlag='+BOBBoolToStr(FStopFlag));
+      except
+       on E:Exception do prMessageLOG(nmProc+' - Ошибка записи подробностей ошибки '+E.Message);
+      end;    *)
+    end;
+  end;
+  finally
+    prFree(rIniFile);
+  end;
+end; // WorkProc
+//==============================================================================
+constructor TCheckSMSThread.Create(CreateSuspended: Boolean; AThreadType: integer);
+const nmProc = 'TCheckSMSThread'; // имя процедуры/функции/потока
+begin
+  inherited Create(CreateSuspended, AThreadType);
+  ThreadName:= 'thCheckSMSThread';
+  prSetThLogParams(ThreadData, 0, 0, 0, ThreadName); // логирование в ib_css
+  prMessageLOG(nmProc+': Запуск потока отправки СМС');
+end;
+//==============================================================================
+procedure TCheckSMSThread.DoTerminate;
+begin
+  inherited;
+  prMessageLOG(ThreadName+': Завершение потока отправки СМС');
+end;
+
+
+end.
