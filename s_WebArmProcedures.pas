@@ -371,7 +371,7 @@ begin
   CurMenuItem:=((aPageName=userInf.PageName) or ((aPageName='balance') and (userInf.PageName='check')));
 
   s:='';
-  if (flNewModeCGI) and  (Address<>'info') or (Address='treemotul') or (Address='motulsite&kindofpage=3') or (Address='logotypes') then begin
+  if ((flNewModeCGI) and  (Address<>'info')) or (Address='treemotul') or (Address='motulsite&kindofpage=3') or (Address='logotypes') then begin
     s:=s+'<a id="mmenu_'+Address+'" class="leftmenuitem'+fnIfStr(CurMenuItem, ' curmenuitem', '')+'" title='''+Title+''' href='''+fnIfStr(Func='', ScriptName+'/universal'+'?act='+Address+'&'+floatTostr(random)+'''', 'javascript: '+Func+'''');
   end
   else begin

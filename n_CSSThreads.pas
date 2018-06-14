@@ -367,12 +367,9 @@ begin
     flTradePoint:= rIniFile.ReadInteger('Options', 'flTradePoint', 0)=1;           // флаг управления торг.точками
 //---------------------- новые
     flPictNotShow:= rIniFile.ReadInteger('Options', 'flPictNotShow', 0)=1;         // флаг управления признаком "не показывать картинки"
-
     flWareForSearch:= rIniFile.ReadInteger('Options', 'flWareForSearch', 0)=1;     // флаг признака товара участия в поиске (Web)
-
     flNewOrdersMode:= rIniFile.ReadInteger('Options', 'flNewOrdersMode', 0)=1;         // флаг вывода страницы Заказы но новой схеме
-    flNewOrderMode:= rIniFile.ReadInteger('Options', 'flNewOrdersMode', 0)=1;         // флаг вывода страницы Заказы но новой схеме
-
+    flNewOrderMode:= rIniFile.ReadInteger('Options', 'flNewOrderMode', 0)=1;         // флаг вывода страницы Заказы но новой схеме
     flGetExcelWareList:= rIniFile.ReadInteger('Options', 'flGetExcelWareList', 0)=1;         // флаг вывода страницы Заказы но новой схеме
 
     if not IsServiceCSS and fIconExist and (iAppStatus<0) and Application.MainForm.Visible then begin // сворачиваем форму

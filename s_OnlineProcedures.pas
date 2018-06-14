@@ -355,7 +355,7 @@ begin
  flNotRemindComment:=Stream.ReadStr;// пропуск признака напоминания о незаполненнном комментарии
  Result:=Result+'TStream.flNotRemindComment="'+flNotRemindComment+'";'#13#10;
  deliveryStr:=Stream.ReadStr;
- Result:=Result+'TStream.flNotRemindComment="'+flNotRemindComment+'";'#13#10;
+ Result:=Result+'TStream.deliveryStr="'+deliveryStr+'";'#13#10;
  warantNum:=Stream.ReadStr;
  Result:=Result+'TStream.warantNum="'+warantNum+'";'#13#10;
  warantDate:=Stream.ReadDouble;
@@ -477,6 +477,73 @@ begin
  else
    Result:=Result+'TStream.ExcelFileNameSRC="";'#13#10;
  Result:=Result+'New_getOrderListPage();'#13#10;
+ Result:=Result+'</script>'#13#10;
+end;
+
+// страница  заказа  в гривне
+function fnGetNewAcPage(Stream: TBoBMemoryStream): string;
+ var
+   ORDRNUM,AccountNum,ORDRDATE,ORDRSUM,CURRENCY,acctype,Delivery,STATUSNAME,WEIGHT,AnnulInfo,AccMeetText: string;
+   STATUS,LineQty,i,CurLine: integer;
+   CurWareCode,Analogue,Brand,WareName,WarePrice,WareQv,WarePriceSum: string;
+   Zakaz:Double;
+ begin
+ Result:='';
+ Result:=Result+'<script>'#13#10;
+ Result:=Result+'var flMeetPerson='+BoolToStr(flMeetPerson)+';'#13#10;
+ Result:=Result+'TStream.length=0;'#13#10;
+ ORDRNUM:=Stream.ReadStr;
+ Result:=Result+'TStream.ORDRNUM="'+ORDRNUM+'";'#13#10;
+ AccountNum:=Stream.ReadStr;
+ Result:=Result+'TStream.AccountNum="'+AccountNum+'";'#13#10;
+ ORDRDATE:=Stream.ReadStr;
+ Result:=Result+'TStream.ORDRDATE="'+ORDRDATE+'";'#13#10;
+ ORDRSUM:=Stream.ReadStr;
+ //ORDRSUM:=StringReplace(ORDRSUM,',','.',[rfReplaceAll]);
+ Result:=Result+'TStream.ORDRSUM="'+ORDRSUM+'";'#13#10;
+ CURRENCY:=Stream.ReadStr;
+ Result:=Result+'TStream.CURRENCY="'+CURRENCY+'";'#13#10;
+ acctype:=Stream.ReadStr; // ACCOUNTINGTTYPE
+ Result:=Result+'TStream.acctype="'+acctype+'";'#13#10;
+ Delivery:=IntToStr(Stream.ReadInt);
+ Result:=Result+'TStream.Delivery="'+Delivery+'";'#13#10;
+ STATUS:=Stream.ReadInt;
+ Result:=Result+'TStream.STATUS="'+IntToStr(STATUS)+'";'#13#10;
+ STATUSNAME:='<span class=statusinh1 style=''color:'+arOrderStatusDecor[Status].WebStyle+'''>'+Stream.ReadStr+'</span>'+Stream.ReadStr;
+ Result:=Result+'TStream.STATUSNAME="'+STATUSNAME+'";'#13#10;
+ WEIGHT:=Stream.ReadStr;
+ Result:=Result+'TStream.WEIGHT="'+WEIGHT+'";'#13#10;
+ AnnulInfo:=Stream.ReadStr;
+ Result:=Result+'TStream.AnnulInfo="'+AnnulInfo+'";'#13#10;
+ if flMeetPerson  then begin
+   AccMeetText:=Stream.ReadStr;
+   Result:=Result+'TStream.AccMeetText="'+AccMeetText+'";'#13#10;
+ end
+ else
+   Result:=Result+'TStream.AccMeetText="";'#13#10;
+ Result:=Result+'TStream.arrtable=new Array();'#13#10;
+ LineQty:=Stream.ReadInt;
+ Result:=Result+'TStream.LineQty="'+IntToStr(LineQty)+'";'#13#10;
+ Result:=Result+'TStream.arrtable=new Array();'#13#10;
+ for i:=0 to LineQty-1 do begin
+   Result:=Result+'TStream.arrtable['+IntToStr(i)+']={';
+   CurLine:=Stream.ReadInt;
+   CurWareCode:=Stream.ReadStr;
+   Analogue:=Stream.ReadStr;           // код группы аналогов
+   Result:=Result+'CurLine:'+IntToStr(CurLine)+', CurWareCode:"'+CurWareCode+'", Analogue:"'+Analogue+'"';
+   Brand:=Stream.ReadStr;  // бренд
+   WareName:=Stream.ReadStr;
+   Zakaz:=Stream.ReadDouble;
+   Result:=Result+', Brand:"'+Brand+'", WareName:"'+WareName+'", Zakaz:"'+FloatToStr(Zakaz)+'"';
+   WareQv:=Stream.ReadStr;
+   WarePrice:=Stream.ReadStr;
+   //WarePrice:=StringReplace(WarePrice,',','.',[rfReplaceAll]);
+   WarePriceSum:=Stream.ReadStr;
+   //WarePriceSum:=StringReplace(WarePriceSum,',','.',[rfReplaceAll]);
+   Result:=Result+', WareQv:"'+WareQv+'", WarePrice:"'+WarePrice+'", WarePriceSum:"'+WarePriceSum+'"';
+   Result:=Result+'};'#13#10;
+ end;
+ Result:=Result+'New_getAcListPage();'#13#10;
  Result:=Result+'</script>'#13#10;
 end;
 
@@ -2345,6 +2412,29 @@ ErrorPos:='7';
             end;
           end
 
+          else if (curUserInfo.strOther.Values['act']='ac') then begin
+            nmProc := 'prShowACOrderOrd'; // имя процедуры/функции
+            StreamNew.Clear;
+            StreamNew.WriteInt(StrToInt(curUserInfo.UserID));
+            StreamNew.WriteInt(StrToInt(curUserInfo.FirmID));
+            StreamNew.WriteInt(curUserInfo.ContractId);
+            StreamNew.WriteStr(fnGetFieldStrList(curUserInfo.strPost,curUserInfo.strGet,'order'));
+            prShowACOrderOrd(StreamNew,ThreadData);
+            if StreamNew.ReadInt=aeSuccess then begin
+              Stream.Clear;
+              curUserInfo.PageName:=curUserInfo.strOther.Values['act'];
+              Stream.WriteInt(aeSuccess);
+              Stream.WriteLongStr(fnHeaderRedisign(curUserInfo)+#13#10+Result);
+              Stream.WriteLongStr(fnGetNewAcPage(StreamNew));
+              Stream.WriteStr(fnFooterRedisign(curUserInfo));
+              Stream.WriteStr(curUserInfo.UserID);
+              Stream.WriteStr(curUserInfo.FirmID);
+              Stream.WriteInt(curUserInfo.ContractId);
+            end else begin
+              setErrorStrsOrder(curUserInfo,StreamNew,Stream);
+            end;
+          end
+
           else if (curUserInfo.strOther.Values['act']='order') then begin
             nmProc := 'prShowOrderOrd'; // имя процедуры/функции
             OrderCode:=trim(fnGetFieldStrList(curUserInfo.strPost,curUserInfo.strGet,'ordernum'));
@@ -2468,12 +2558,12 @@ ErrorPos:='7';
             if StreamNew.ReadInt=aeSuccess then begin
               Stream.Clear;
               Stream.WriteInt(aeSuccess);
-              s1:=Stream.ReadStr;
-              s:='<script>'#13#10;
+              s1:=StreamNew.ReadStr;
+              //s:='<script>'#13#10;
               s:=s+'jqswMessage("'+GetJSSafeString(s1)+'");'#13#10;;
               if (Pos('не изменились', s1)=0) then
                 s:=s+'reloadpage();';//location.href="'+Request.ScriptName+'/order?order='+Request.ContentFields.Values['order']+'"';
-              s:=s+'</script>'#13#10;
+              //s:=s+'</script>'#13#10;
               Stream.WriteStr(s);
             end else begin
               setErrorCommand(StreamNew,Stream);
